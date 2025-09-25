@@ -13,6 +13,9 @@ bash -c 'set -e; URL="https://raw.githubusercontent.com/AirysDark/pi-gitea-insta
 ```
 
 ## ✅ One-Line Install
+```bash
+bash <(curl -fsSL https://raw.githubusercontent.com/AirysDark/pi-gitea-installer/main/gitea-runner-menu.sh)
+```
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/AirysDark/pi-gitea-installer/main/gitea-runner-menu.sh -o gitea-runner-menu.sh \
