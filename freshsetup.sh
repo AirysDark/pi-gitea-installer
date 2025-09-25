@@ -6,8 +6,9 @@ set -euo pipefail
 # ========================
 # Performs:
 # 1) Download + install Retropie shutdown script from ZIP
-# 2) Enable root login over SSH, set root password to 'root'
-# 3) Write NetworkManager wifi profiles with static IPv4
+# 2) Enable root login over SSH
+# 3) PROMPT for root password (no hardcoded default)
+# 4) PROMPT for NetworkManager IPv4 address/gateway/DNS and write wifi profiles
 #
 # Tested for Debian/Raspberry Pi OS–style systems.
 # Run as root:  sudo ./freshsetup.sh
@@ -21,7 +22,11 @@ NM_DIR="/etc/NetworkManager/system-connections"
 NM_FILE_A="${NM_DIR}/preconfigured.nmconnection.WAGSD3"
 NM_FILE_B="${NM_DIR}/preconfigured.nmconnection"
 
-# SSHD config (exact content you pasted)
+SSID_VALUE="Raspbain"
+PSK_VALUE="8cf640ea74906b5b7b4df01089861285e86fe325a65634395b0d99b22daf3ed9"
+UUID_VALUE="0bf0601a-749f-4c2c-893c-7ba5a9758d08"
+
+# SSHD config (exact content you supplied, with PermitRootLogin yes)
 read -r -d '' SSHD_CONFIG_CONTENT <<"EOF"
 # This is the sshd server system-wide configuration file.  See
 # sshd_config(5) for more information.
@@ -111,7 +116,7 @@ UsePAM yes
 #AllowAgentForwarding yes
 #AllowTcpForwarding yes
 #GatewayPorts no
-X11Forwarding yes
+X1Forwarding yes
 #X11DisplayOffset 10
 #X11UseLocalhost yes
 #PermitTTY yes
@@ -146,26 +151,26 @@ Subsystem	sftp	/usr/lib/openssh/sftp-server
 #	ForceCommand cvs server
 EOF
 
-# First NetworkManager profile (with WAGSD3 suffix)
-read -r -d '' NM_CONTENT_A <<"EOF"
+# NetworkManager profile templates (use placeholders, replace after prompts)
+read -r -d '' NM_TEMPLATE <<"EOF"
 [connection]
 id=preconfigured
-uuid=0bf0601a-749f-4c2c-893c-7ba5a9758d08
+uuid=UUID_PLACEHOLDER
 type=wifi
 timestamp=1747095304
 
 [wifi]
 hidden=true
 mode=infrastructure
-ssid=Raspbain
+ssid=SSID_PLACEHOLDER
 
 [wifi-security]
 key-mgmt=wpa-psk
-psk=8cf640ea74906b5b7b4df01089861285e86fe325a65634395b0d99b22daf3ed9
+psk=PSK_PLACEHOLDER
 
 [ipv4]
-address1=192.168.0.140/24,192.168.0.1
-dns=192.168.0.1;
+address1=IPV4_ADDR_PLACEHOLDER,IPV4_GW_PLACEHOLDER
+dns=IPV4_DNS_PLACEHOLDER;
 method=manual
 
 [ipv6]
@@ -175,26 +180,26 @@ method=auto
 [proxy]
 EOF
 
-# Second NetworkManager profile (without suffix)
-read -r -d '' NM_CONTENT_B <<"EOF"
+# Second file uses a different timestamp but same fields
+read -r -d '' NM_TEMPLATE_B <<"EOF"
 [connection]
 id=preconfigured
-uuid=0bf0601a-749f-4c2c-893c-7ba5a9758d08
+uuid=UUID_PLACEHOLDER
 type=wifi
 timestamp=1758798433
 
 [wifi]
 hidden=true
 mode=infrastructure
-ssid=Raspbain
+ssid=SSID_PLACEHOLDER
 
 [wifi-security]
 key-mgmt=wpa-psk
-psk=8cf640ea74906b5b7b4df01089861285e86fe325a65634395b0d99b22daf3ed9
+psk=PSK_PLACEHOLDER
 
 [ipv4]
-address1=192.168.0.140/24,192.168.0.1
-dns=192.168.0.1;
+address1=IPV4_ADDR_PLACEHOLDER,IPV4_GW_PLACEHOLDER
+dns=IPV4_DNS_PLACEHOLDER;
 method=manual
 
 [ipv6]
@@ -243,13 +248,26 @@ reload_nm() {
   fi
 }
 
+prompt_nonempty() {
+  local prompt="$1"
+  local var
+  while true; do
+    read -r -p "$prompt" var
+    if [[ -n "${var}" ]]; then
+      echo "$var"
+      return 0
+    fi
+    echo "Value cannot be empty."
+  done
+}
+
 # ---- run ----
 require_root
 require_cmd wget
 require_cmd unzip
-require_cmd passwd || true   # usually present
 require_cmd chpasswd
 
+echo "================ Setup: Retropie shutdown script ================"
 TMPDIR="$(mktemp -d)"
 pushd "$TMPDIR" >/dev/null
 
@@ -264,16 +282,53 @@ pushd "$REPO_DIR_NAME" >/dev/null
 sh install.sh retropie
 popd >/dev/null
 
-echo "[4/5] Configuring SSH for root login and setting password..."
+echo "================ SSH configuration =============================="
+echo "[4/5] Configuring SSH for root login..."
 backup_file "$SSH_CONFIG_PATH"
 printf "%s\n" "$SSHD_CONFIG_CONTENT" > "$SSH_CONFIG_PATH"
 
-# Set root password to 'root'
-echo "root:root" | chpasswd
+# Prompt for root password (no echo)
+echo "[*] Set root password (input hidden)."
+while true; do
+  read -s -p "Enter new root password: " ROOTPASS
+  echo
+  read -s -p "Confirm root password: " ROOTPASS2
+  echo
+  if [[ "$ROOTPASS" == "$ROOTPASS2" && -n "$ROOTPASS" ]]; then
+    echo "root:$ROOTPASS" | chpasswd
+    echo "[OK] Root password updated."
+    break
+  else
+    echo "Passwords do not match or are empty. Try again."
+  fi
+done
 
 restart_ssh
+echo "[OK] SSH reloaded."
 
-echo "[5/5] Writing NetworkManager profiles..."
+echo "================ NetworkManager profiles ========================"
+echo "[5/5] Provide static IPv4 settings for Wi-Fi profile 'preconfigured'."
+IPV4_ADDR=$(prompt_nonempty "IPv4 address with CIDR (e.g. 192.168.0.140/24): ")
+IPV4_GW=$(prompt_nonempty   "Gateway (e.g. 192.168.0.1): ")
+IPV4_DNS=$(prompt_nonempty  "DNS server (e.g. 192.168.0.1): ")
+
+# Build profile contents from templates
+NM_CONTENT_A="$NM_TEMPLATE"
+NM_CONTENT_A="${NM_CONTENT_A//UUID_PLACEHOLDER/$UUID_VALUE}"
+NM_CONTENT_A="${NM_CONTENT_A//SSID_PLACEHOLDER/$SSID_VALUE}"
+NM_CONTENT_A="${NM_CONTENT_A//PSK_PLACEHOLDER/$PSK_VALUE}"
+NM_CONTENT_A="${NM_CONTENT_A//IPV4_ADDR_PLACEHOLDER/$IPV4_ADDR}"
+NM_CONTENT_A="${NM_CONTENT_A//IPV4_GW_PLACEHOLDER/$IPV4_GW}"
+NM_CONTENT_A="${NM_CONTENT_A//IPV4_DNS_PLACEHOLDER/$IPV4_DNS}"
+
+NM_CONTENT_B="$NM_TEMPLATE_B"
+NM_CONTENT_B="${NM_CONTENT_B//UUID_PLACEHOLDER/$UUID_VALUE}"
+NM_CONTENT_B="${NM_CONTENT_B//SSID_PLACEHOLDER/$SSID_VALUE}"
+NM_CONTENT_B="${NM_CONTENT_B//PSK_PLACEHOLDER/$PSK_VALUE}"
+NM_CONTENT_B="${NM_CONTENT_B//IPV4_ADDR_PLACEHOLDER/$IPV4_ADDR}"
+NM_CONTENT_B="${NM_CONTENT_B//IPV4_GW_PLACEHOLDER/$IPV4_GW}"
+NM_CONTENT_B="${NM_CONTENT_B//IPV4_DNS_PLACEHOLDER/$IPV4_DNS}"
+
 mkdir -p "$NM_DIR"
 printf "%s\n" "$NM_CONTENT_A" > "$NM_FILE_A"
 printf "%s\n" "$NM_CONTENT_B" > "$NM_FILE_B"
@@ -287,9 +342,8 @@ rm -rf "$TMPDIR"
 
 echo "✅ Done."
 echo "Notes:"
-echo " - Root SSH login is enabled. Password is 'root' (CHANGE THIS IMMEDIATELY)."
-echo " - SSH service restarted."
+echo " - Root SSH login is ENABLED. Keep the password secret and consider disabling root SSH after setup."
 echo " - NetworkManager profiles written to:"
 echo "     $NM_FILE_A"
 echo "     $NM_FILE_B"
-echo " - If Wi-Fi doesn't come up automatically, try: nmcli con up preconfigured"
+echo " - Bring Wi-Fi up (if not automatic): nmcli con up preconfigured"
