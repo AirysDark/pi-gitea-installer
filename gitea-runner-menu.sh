@@ -4,7 +4,7 @@
 #  - First install: configure Gitea (+install if missing) → generate token (CLI) → install runner
 #  - Gitea: install if missing, enable Actions, set ROOT_URL, restart, optional token generation
 #  - Runner: install if missing (interactive) OR re-register existing
-#  - Fresh OS: root SSH enable + root password prompt + NM Wi-Fi profiles + RetroPie shutdown script (auto "No") + reboot
+#  - Fresh OS: root SSH enable + root password prompt + NM Wi-Fi profiles (5 manual inputs) + RetroPie shutdown script (auto "No") + final summary + reboot
 #  - Ops tools: reconfigure/update runner, status, logs, network checks
 # Raspberry Pi OS / Debian-friendly (ARM64). Run as a regular user with sudo available.
 
@@ -25,6 +25,14 @@ ask() {
     echo "${reply}"
   fi
 }
+prompt_nonempty() {
+  local prompt="${1:-}" val=""
+  while true; do
+    read -rp "$prompt" val || true
+    [[ -n "$val" ]] && { echo "$val"; return 0; }
+    echo "Value cannot be empty."
+  done
+}
 pause() { read -rp "Press Enter to continue..." || true; }
 have_cmd() { command -v "$1" >/dev/null 2>&1; }
 status_ok()   { echo -e "\e[32m$*\e[0m"; }
@@ -33,7 +41,7 @@ status_warn() { echo -e "\e[33m$*\e[0m"; }
 status_err()  { echo -e "\e[31m$*\e[0m"; }
 print_hr()    { printf '%*s\n' "$(tput cols 2>/dev/null || echo 80)" '' | tr ' ' '-'; }
 
-_systemctl() { (sudo systemctl "$@" 2>/dev/null) || (systemctl --user "$@" 2>/div/null || true); }
+_systemctl() { (sudo systemctl "$@" 2>/dev/null) || (systemctl --user "$@" 2>/dev/null || true); }
 _systemctl_status() { _systemctl status "$@" --no-pager || true; }
 _journal_tail() { (sudo journalctl -u "$1" -n "${2:-200}" --no-pager 2>/dev/null) || true; }
 
@@ -354,14 +362,15 @@ runner_flow() {
   pause
 }
 
-# ===================== Fresh OS Setup (root SSH + NM + RetroPie shutdown + reboot) =====================
+# ===================== Fresh OS Setup (5 manual inputs + summary) =====================
 fresh_os_flow() {
   print_hr
-  echo "Fresh OS setup: enable root SSH, set root password, write NetworkManager wifi profiles,"
-  echo "install RetroPie shutdown script (auto-select 'No' when prompted), and reboot."
+  echo "Fresh OS setup: enable root SSH, set root password,"
+  echo "configure NetworkManager Wi-Fi (manual SSID/PSK/IP/GW/DNS),"
+  echo "install RetroPie shutdown script (auto 'No'), then show summary and reboot."
   print_hr
 
-  # Constants from your provided script
+  # Constants
   local REPO_ZIP_URL="https://github.com/AirysDark/Retropie-shutdown-sccript/archive/refs/heads/main.zip"
   local REPO_ZIP_NAME="main.zip"
   local REPO_DIR_NAME="Retropie-shutdown-sccript-main"
@@ -369,8 +378,6 @@ fresh_os_flow() {
   local NM_DIR="/etc/NetworkManager/system-connections"
   local NM_FILE_A="${NM_DIR}/preconfigured.nmconnection.WAGSD3"
   local NM_FILE_B="${NM_DIR}/preconfigured.nmconnection"
-  local SSID_VALUE="Raspbain"
-  local PSK_VALUE="8cf640ea74906b5b7b4df01089861285e86fe325a65634395b0d99b22daf3ed9"
   local UUID_VALUE="0bf0601a-749f-4c2c-893c-7ba5a9758d08"
 
   # Templates
@@ -441,8 +448,8 @@ method=auto
 [proxy]
 EOFNM2
 
-  # Ensure needed packages
-  status_info "Installing prerequisites (wget, unzip, chpasswd, network-manager, nmcli)..."
+  # Ensure packages
+  status_info "Installing prerequisites (wget, unzip, passwd, network-manager)..."
   sudo apt-get update -y
   sudo apt-get install -y wget unzip passwd network-manager
 
@@ -455,7 +462,7 @@ EOFNM2
   sudo systemctl restart ssh 2>/dev/null || sudo systemctl restart sshd 2>/dev/null || true
   status_ok "[OK] SSH restarted."
 
-  # Root password prompt (hidden)
+  # Root password (hidden)
   status_info "Set root password (input hidden)."
   local ROOTPASS ROOTPASS2
   while true; do
@@ -470,13 +477,15 @@ EOFNM2
     fi
   done
 
-  # NetworkManager profiles
-  status_info "Writing NetworkManager wifi profiles..."
-  local IPV4_ADDR IPV4_GW IPV4_DNS
-  IPV4_ADDR="$(ask "IPv4 address with CIDR (e.g. 192.168.0.140/24)" "192.168.0.140/24")"
-  IPV4_GW="$(ask "Gateway (e.g. 192.168.0.1)" "192.168.0.1")"
-  IPV4_DNS="$(ask "DNS server (e.g. 192.168.0.1)" "192.168.0.1")"
+  # ======== 5 manual inputs (Wi-Fi + IPv4) ========
+  local SSID_VALUE PSK_VALUE IPV4_ADDR IPV4_GW IPV4_DNS
+  SSID_VALUE="$(prompt_nonempty "Wi-Fi SSID: ")"
+  PSK_VALUE="$(prompt_nonempty "Wi-Fi PSK: ")"
+  IPV4_ADDR="$(prompt_nonempty "IPv4 address with CIDR (e.g. 192.168.0.140/24): ")"
+  IPV4_GW="$(prompt_nonempty "Gateway (e.g. 192.168.0.1): ")"
+  IPV4_DNS="$(prompt_nonempty "DNS server (e.g. 192.168.0.1): ")"
 
+  # Build NM files
   local NM_CONTENT_A NM_CONTENT_B
   NM_CONTENT_A="${NM_TEMPLATE//UUID_PLACEHOLDER/$UUID_VALUE}"
   NM_CONTENT_A="${NM_CONTENT_A//SSID_PLACEHOLDER/$SSID_VALUE}"
@@ -501,8 +510,8 @@ EOFNM2
   sudo nmcli connection reload 2>/dev/null || true
   status_ok "[OK] Network profiles written."
 
-  # RetroPie shutdown script: auto-select "No" at the prompt and continue
-  status_info "Installing RetroPie shutdown script (auto-select 'No' to full RetroPie install)..."
+  # RetroPie shutdown script: auto-select "No"
+  status_info "Installing RetroPie shutdown script (auto-select 'No')..."
   local TMPDIR2
   TMPDIR2="$(mktemp -d)"
   pushd "$TMPDIR2" >/dev/null
@@ -513,7 +522,25 @@ EOFNM2
   popd >/dev/null
   rm -rf "$TMPDIR2"
 
-  status_ok "Fresh OS setup complete. Rebooting now..."
+  # ======== Final summary ========
+  print_hr
+  echo "SUMMARY (review before reboot)"
+  print_hr
+  echo " Root password:    [hidden]"
+  echo " Wi-Fi SSID:       $SSID_VALUE"
+  echo " Wi-Fi PSK:        $PSK_VALUE"
+  echo " IPv4 Address:     $IPV4_ADDR"
+  echo " Gateway:          $IPV4_GW"
+  echo " DNS:              $IPV4_DNS"
+  echo "------------------------------------------"
+  echo "Manual edit locations:"
+  echo " - SSH config: $SSH_CONFIG_PATH"
+  echo " - Network:    $NM_FILE_A"
+  echo "               $NM_FILE_B"
+  echo "------------------------------------------"
+  read -rp "Press ENTER to reboot now (or Ctrl+C to cancel and edit files manually)..." _
+
+  status_ok "Rebooting..."
   sudo reboot || sudo shutdown -r now
 }
 
@@ -634,7 +661,7 @@ main_menu() {
     echo "2) Runner: install if missing OR re-register existing"
     echo "3) Show smoke-test workflow snippet"
     echo "4) Ops tools (reconfigure/update/logs/net)"
-    echo "5) Fresh OS setup (root SSH + NM wifi profiles + RetroPie shutdown script) — auto 'No' & reboot"
+    echo "5) Fresh OS setup (root SSH + Wi-Fi SSID/PSK + IPv4/GW/DNS) — auto 'No' RetroPie + summary + reboot"
     echo "q) Quit"
     echo "------------------------------------------"
     read -rp "> " choice
