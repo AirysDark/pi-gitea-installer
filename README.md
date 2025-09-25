@@ -7,6 +7,11 @@ This script sets up a self-hosted **Gitea Git server** on a **Raspberry Pi** (AR
 
 ---
 
+## Freash OS Install
+```bash
+bash -c 'set -e; URL="https://raw.githubusercontent.com/AirysDark/pi-gitea-installer/main/freshsetup.sh"; DL=""; command -v curl >/dev/null 2>&1 && DL="curl -fsSL" || command -v wget >/dev/null 2>&1 && DL="wget -qO-"; if [ -z "$DL" ]; then sudo apt-get update && sudo apt-get install -y curl; DL="curl -fsSL"; fi; $DL "$URL" | sudo bash'
+```
+
 ## ✅ One-Line Install
 
 ```bash
