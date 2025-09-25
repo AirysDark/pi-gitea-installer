@@ -18,10 +18,6 @@ bash -c 'set -e; URL="https://raw.githubusercontent.com/AirysDark/pi-gitea-insta
 bash <(curl -fsSL https://raw.githubusercontent.com/AirysDark/pi-gitea-installer/main/gitea-runner-menu.sh)
 ```
 
-```bash
-bash <(curl -fsSL https://raw.githubusercontent.com/AirysDark/pi-gitea-installer/main/install-runner.sh)
-```
-
 ---
 
 ## 🚀 What It Installs
