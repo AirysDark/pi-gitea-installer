@@ -1,19 +1,24 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-### CONFIG — edit these before running ###
-INSTANCE_URL="http://192.168.0.140:3000/"       # your Gitea instance
-REG_TOKEN="PASTE_YOUR_RUNNER_TOKEN_HERE"        # get from Gitea UI (Admin → Actions → Runners)
-RUNNER_NAME="$(hostname)"                       # default: use Pi hostname
-RUNNER_LABELS="self-hosted,linux,arm64,pi"      # labels you want
-RUNNER_VERSION="0.2.10"                         # act_runner version
-INSTALL_DIR="/usr/local/bin"
-SERVICE_USER="$USER"                            # current user
-##############################################
+# ================== CONFIG ==================
+INSTANCE_URL="${INSTANCE_URL:-http://192.168.0.140:3000/}"   # override with env
+REG_TOKEN="${REG_TOKEN:-}"                                   # must pass in env
+RUNNER_NAME="${RUNNER_NAME:-$(hostname)}"                   # default = hostname
+RUNNER_LABELS="${RUNNER_LABELS:-self-hosted,linux,arm64,pi}" # override if needed
+RUNNER_VERSION="${RUNNER_VERSION:-0.2.10}"                  # default version
+INSTALL_DIR="${INSTALL_DIR:-/usr/local/bin}"
+SERVICE_USER="${SERVICE_USER:-$USER}"
+# ============================================
+
+if [[ -z "$REG_TOKEN" ]]; then
+  echo "❌ ERROR: REG_TOKEN not set"
+  echo "Usage: REG_TOKEN=xxxx INSTANCE_URL=http://192.168.x.x:3000 bash <(curl -fsSL ...)"
+  exit 1
+fi
 
 echo "==> Updating system"
 sudo apt-get update -y
-sudo apt-get upgrade -y
 sudo apt-get install -y curl unzip
 
 echo "==> Installing act_runner $RUNNER_VERSION"
@@ -21,7 +26,7 @@ curl -L "https://gitea.com/gitea/act_runner/releases/download/v${RUNNER_VERSION}
 chmod +x /tmp/act_runner
 sudo mv /tmp/act_runner "$INSTALL_DIR/act_runner"
 
-echo "==> Registering runner with Gitea"
+echo "==> Registering runner"
 mkdir -p "$HOME/.config/act_runner"
 "$INSTALL_DIR/act_runner" register \
   --instance "$INSTANCE_URL" \
@@ -55,5 +60,5 @@ sudo systemctl daemon-reload
 sudo systemctl enable gitea-runner
 sudo systemctl start gitea-runner
 
-echo "==> Done!"
+echo "✅ Done! Runner installed and started."
 echo "Check logs with: journalctl -u gitea-runner -f"
