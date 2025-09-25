@@ -4,9 +4,9 @@ set -euo pipefail
 # ================== CONFIG ==================
 INSTANCE_URL="${INSTANCE_URL:-http://192.168.0.140:3000/}"   # override with env
 REG_TOKEN="${REG_TOKEN:-}"                                   # must pass in env
-RUNNER_NAME="${RUNNER_NAME:-$(hostname)}"                   # default = hostname
+RUNNER_NAME="runner"                                         # fixed name
 RUNNER_LABELS="${RUNNER_LABELS:-self-hosted,linux,arm64,pi}" # override if needed
-RUNNER_VERSION="${RUNNER_VERSION:-0.2.10}"                  # default version
+RUNNER_VERSION="${RUNNER_VERSION:-0.2.10}"                   # default version
 INSTALL_DIR="${INSTALL_DIR:-/usr/local/bin}"
 SERVICE_USER="${SERVICE_USER:-$USER}"
 # ============================================
