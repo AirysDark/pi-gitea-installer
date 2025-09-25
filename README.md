@@ -13,6 +13,17 @@ This script sets up a self-hosted **Gitea Git server** on a **Raspberry Pi** (AR
 bash <(curl -fsSL https://raw.githubusercontent.com/AirysDark/pi-gitea-installer/main/install.sh)
 ```
 
+```bash
+bash <(curl -fsSL https://raw.githubusercontent.com/AirysDark/pi-gitea-installer/main/install-runner.sh)
+```
+
+```bash
+bash <(curl -fsSL https://raw.githubusercontent.com/AirysDark/pi-gitea-installer/main/install-runner.sh) \
+  && export INSTANCE_URL="http://192.168.0.140:3000/" \
+  && export REGISTRATION_TOKEN="6ukYJB5JdpuBKptfA4zFYvfA3XhCqm0FFPgVJkUO" \
+  && ./install-runner.sh
+```
+
 ---
 
 ## 🚀 What It Installs
