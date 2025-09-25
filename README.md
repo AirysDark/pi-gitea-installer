@@ -19,7 +19,7 @@ bash <(curl -fsSL https://raw.githubusercontent.com/AirysDark/pi-gitea-installer
 
 ```bash
 INSTANCE_URL="http://192.168.0.140:3000/" \
-REG_TOKEN="6ukYJB5JdpuBKptfA4zFYvfA3XhCqm0FFPgVJkUO" \
+REG_TOKEN="1xYv8rhioHFyLtzLSZOZHadCxhYovuxfkBFUaMJi" \
 bash <(curl -fsSL https://raw.githubusercontent.com/AirysDark/pi-gitea-installer/main/install-runner.sh)
 ```
 
