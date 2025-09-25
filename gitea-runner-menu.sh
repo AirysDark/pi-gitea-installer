@@ -1,10 +1,11 @@
 #!/usr/bin/env bash
 # gitea-runner-menu.sh
 # All-in-one menu:
-#  - Install & configure Gitea (if missing), enable Actions, set ROOT_URL
-#  - Generate a runner registration token (via Gitea CLI if available)
-#  - Install & register Gitea Actions runner on this host (if missing), or re-register existing
-#  - Ops tools (status/logs/reconfigure/update/net checks)
+#  - First install: configure Gitea (+install if missing) → generate token (CLI) → install runner
+#  - Gitea: install if missing, enable Actions, set ROOT_URL, restart, optional token generation
+#  - Runner: install if missing (interactive) OR re-register existing
+#  - Fresh OS: root SSH enable + root password prompt + NM Wi-Fi profiles + RetroPie shutdown script (auto "No") + reboot
+#  - Ops tools: reconfigure/update runner, status, logs, network checks
 # Raspberry Pi OS / Debian-friendly (ARM64). Run as a regular user with sudo available.
 
 set -euo pipefail
@@ -32,7 +33,7 @@ status_warn() { echo -e "\e[33m$*\e[0m"; }
 status_err()  { echo -e "\e[31m$*\e[0m"; }
 print_hr()    { printf '%*s\n' "$(tput cols 2>/dev/null || echo 80)" '' | tr ' ' '-'; }
 
-_systemctl() { (sudo systemctl "$@" 2>/dev/null) || (systemctl --user "$@" 2>/dev/null || true); }
+_systemctl() { (sudo systemctl "$@" 2>/dev/null) || (systemctl --user "$@" 2>/div/null || true); }
 _systemctl_status() { _systemctl status "$@" --no-pager || true; }
 _journal_tail() { (sudo journalctl -u "$1" -n "${2:-200}" --no-pager 2>/dev/null) || true; }
 
@@ -287,16 +288,10 @@ EOF
 }
 
 runner_installed() {
-  # Consider installed if act_runner exists AND a service file or active service exists
-  if have_cmd act_runner; then
-    return 0
-  fi
-  if systemctl list-unit-files 2>/dev/null | grep -q '^gitea-runner\.service'; then
-    return 0
-  fi
-  if systemctl is-active gitea-runner >/dev/null 2>&1; then
-    return 0
-  fi
+  # Consider installed if act_runner exists OR a service exists/active
+  if have_cmd act_runner; then return 0; fi
+  if systemctl list-unit-files 2>/dev/null | grep -q '^gitea-runner\.service'; then return 0; fi
+  if systemctl is-active gitea-runner >/dev/null 2>&1; then return 0; fi
   return 1
 }
 
@@ -308,7 +303,6 @@ runner_flow() {
 
   if ! runner_installed; then
     runner_bootstrap_install_interactive
-    # Show status after fresh install
     print_hr
     status_info "Service status:"
     _systemctl_status gitea-runner
@@ -323,11 +317,9 @@ runner_flow() {
   _systemctl_status gitea-runner
   echo
 
-  # Offer quick re-register if desired
   local re_reg
   re_reg="$(ask "Re-register this runner with a new token/name/labels? (yes/no)" "no")"
   if [[ "$re_reg" =~ ^y(es)?$ ]]; then
-    # Stop service, wipe config, register again, start
     status_info "Stopping runner service ..."
     sudo systemctl stop gitea-runner || true
     status_info "Wiping previous runner config (~/.config/act_runner) ..."
@@ -362,9 +354,171 @@ runner_flow() {
   pause
 }
 
+# ===================== Fresh OS Setup (root SSH + NM + RetroPie shutdown + reboot) =====================
+fresh_os_flow() {
+  print_hr
+  echo "Fresh OS setup: enable root SSH, set root password, write NetworkManager wifi profiles,"
+  echo "install RetroPie shutdown script (auto-select 'No' when prompted), and reboot."
+  print_hr
+
+  # Constants from your provided script
+  local REPO_ZIP_URL="https://github.com/AirysDark/Retropie-shutdown-sccript/archive/refs/heads/main.zip"
+  local REPO_ZIP_NAME="main.zip"
+  local REPO_DIR_NAME="Retropie-shutdown-sccript-main"
+  local SSH_CONFIG_PATH="/etc/ssh/sshd_config"
+  local NM_DIR="/etc/NetworkManager/system-connections"
+  local NM_FILE_A="${NM_DIR}/preconfigured.nmconnection.WAGSD3"
+  local NM_FILE_B="${NM_DIR}/preconfigured.nmconnection"
+  local SSID_VALUE="Raspbain"
+  local PSK_VALUE="8cf640ea74906b5b7b4df01089861285e86fe325a65634395b0d99b22daf3ed9"
+  local UUID_VALUE="0bf0601a-749f-4c2c-893c-7ba5a9758d08"
+
+  # Templates
+  read -r -d '' SSHD_CONFIG_CONTENT <<"EOFSSHD"
+PermitRootLogin yes
+PasswordAuthentication yes
+KbdInteractiveAuthentication no
+UsePAM yes
+X11Forwarding yes
+PrintMotd no
+AcceptEnv LANG LC_*
+Subsystem sftp /usr/lib/openssh/sftp-server
+EOFSSHD
+
+  read -r -d '' NM_TEMPLATE <<"EOFNM"
+[connection]
+id=preconfigured
+uuid=UUID_PLACEHOLDER
+type=wifi
+timestamp=1747095304
+
+[wifi]
+hidden=true
+mode=infrastructure
+ssid=SSID_PLACEHOLDER
+
+[wifi-security]
+key-mgmt=wpa-psk
+psk=PSK_PLACEHOLDER
+
+[ipv4]
+address1=IPV4_ADDR_PLACEHOLDER,IPV4_GW_PLACEHOLDER
+dns=IPV4_DNS_PLACEHOLDER;
+method=manual
+
+[ipv6]
+addr-gen-mode=default
+method=auto
+
+[proxy]
+EOFNM
+
+  read -r -d '' NM_TEMPLATE_B <<"EOFNM2"
+[connection]
+id=preconfigured
+uuid=UUID_PLACEHOLDER
+type=wifi
+timestamp=1758798433
+
+[wifi]
+hidden=true
+mode=infrastructure
+ssid=SSID_PLACEHOLDER
+
+[wifi-security]
+key-mgmt=wpa-psk
+psk=PSK_PLACEHOLDER
+
+[ipv4]
+address1=IPV4_ADDR_PLACEHOLDER,IPV4_GW_PLACEHOLDER
+dns=IPV4_DNS_PLACEHOLDER;
+method=manual
+
+[ipv6]
+addr-gen-mode=default
+method=auto
+
+[proxy]
+EOFNM2
+
+  # Ensure needed packages
+  status_info "Installing prerequisites (wget, unzip, chpasswd, network-manager, nmcli)..."
+  sudo apt-get update -y
+  sudo apt-get install -y wget unzip passwd network-manager
+
+  # Enable root SSH
+  status_info "Configuring SSHD to permit root login..."
+  if [[ -f "$SSH_CONFIG_PATH" ]]; then
+    sudo cp -a "$SSH_CONFIG_PATH" "$SSH_CONFIG_PATH.bak.$(date +%Y%m%d%H%M%S)"
+  fi
+  echo "$SSHD_CONFIG_CONTENT" | sudo tee "$SSH_CONFIG_PATH" >/dev/null
+  sudo systemctl restart ssh 2>/dev/null || sudo systemctl restart sshd 2>/dev/null || true
+  status_ok "[OK] SSH restarted."
+
+  # Root password prompt (hidden)
+  status_info "Set root password (input hidden)."
+  local ROOTPASS ROOTPASS2
+  while true; do
+    read -s -p "Enter new root password: " ROOTPASS; echo
+    read -s -p "Confirm root password: " ROOTPASS2; echo
+    if [[ "$ROOTPASS" == "$ROOTPASS2" && -n "$ROOTPASS" ]]; then
+      echo "root:$ROOTPASS" | sudo chpasswd
+      status_ok "[OK] Root password updated."
+      break
+    else
+      status_err "Passwords do not match or are empty. Try again."
+    fi
+  done
+
+  # NetworkManager profiles
+  status_info "Writing NetworkManager wifi profiles..."
+  local IPV4_ADDR IPV4_GW IPV4_DNS
+  IPV4_ADDR="$(ask "IPv4 address with CIDR (e.g. 192.168.0.140/24)" "192.168.0.140/24")"
+  IPV4_GW="$(ask "Gateway (e.g. 192.168.0.1)" "192.168.0.1")"
+  IPV4_DNS="$(ask "DNS server (e.g. 192.168.0.1)" "192.168.0.1")"
+
+  local NM_CONTENT_A NM_CONTENT_B
+  NM_CONTENT_A="${NM_TEMPLATE//UUID_PLACEHOLDER/$UUID_VALUE}"
+  NM_CONTENT_A="${NM_CONTENT_A//SSID_PLACEHOLDER/$SSID_VALUE}"
+  NM_CONTENT_A="${NM_CONTENT_A//PSK_PLACEHOLDER/$PSK_VALUE}"
+  NM_CONTENT_A="${NM_CONTENT_A//IPV4_ADDR_PLACEHOLDER/$IPV4_ADDR}"
+  NM_CONTENT_A="${NM_CONTENT_A//IPV4_GW_PLACEHOLDER/$IPV4_GW}"
+  NM_CONTENT_A="${NM_CONTENT_A//IPV4_DNS_PLACEHOLDER/$IPV4_DNS}"
+
+  NM_CONTENT_B="${NM_TEMPLATE_B//UUID_PLACEHOLDER/$UUID_VALUE}"
+  NM_CONTENT_B="${NM_CONTENT_B//SSID_PLACEHOLDER/$SSID_VALUE}"
+  NM_CONTENT_B="${NM_CONTENT_B//PSK_PLACEHOLDER/$PSK_VALUE}"
+  NM_CONTENT_B="${NM_CONTENT_B//IPV4_ADDR_PLACEHOLDER/$IPV4_ADDR}"
+  NM_CONTENT_B="${NM_CONTENT_B//IPV4_GW_PLACEHOLDER/$IPV4_GW}"
+  NM_CONTENT_B="${NM_CONTENT_B//IPV4_DNS_PLACEHOLDER/$IPV4_DNS}"
+
+  sudo mkdir -p "$NM_DIR"
+  echo "$NM_CONTENT_A" | sudo tee "$NM_FILE_A" >/dev/null
+  echo "$NM_CONTENT_B" | sudo tee "$NM_FILE_B" >/dev/null
+  sudo chown root:root "$NM_FILE_A" "$NM_FILE_B"
+  sudo chmod 600 "$NM_FILE_A" "$NM_FILE_B"
+  sudo systemctl reload NetworkManager 2>/dev/null || true
+  sudo nmcli connection reload 2>/dev/null || true
+  status_ok "[OK] Network profiles written."
+
+  # RetroPie shutdown script: auto-select "No" at the prompt and continue
+  status_info "Installing RetroPie shutdown script (auto-select 'No' to full RetroPie install)..."
+  local TMPDIR2
+  TMPDIR2="$(mktemp -d)"
+  pushd "$TMPDIR2" >/dev/null
+  wget -O "$REPO_ZIP_NAME" "$REPO_ZIP_URL"
+  unzip -o "$REPO_ZIP_NAME" >/dev/null
+  cd "$REPO_DIR_NAME"
+  printf 'n\n' | sudo sh install.sh retropie
+  popd >/dev/null
+  rm -rf "$TMPDIR2"
+
+  status_ok "Fresh OS setup complete. Rebooting now..."
+  sudo reboot || sudo shutdown -r now
+}
+
 # ===================== Ops Tools (Reconfigure, Update, Net Checks) =====================
 runner_install_via_external_installer() {
-  # Uses your maintained remote installer (optional path)
   bash <(curl -fsSL https://raw.githubusercontent.com/AirysDark/pi-gitea-installer/main/install-runner.sh)
 }
 
@@ -384,7 +538,6 @@ ops_tools_menu() {
         status_info "Stopping runner & purging config/state ..."
         sudo systemctl stop gitea-runner || true
         rm -rf "$HOME/.config/act_runner" 2>/dev/null || true
-        # Re-register
         local INSTANCE_URL REG_TOKEN RUNNER_NAME RUNNER_LABELS
         INSTANCE_URL="$(ask "INSTANCE_URL" "${PREFILL_INSTANCE_URL:-http://192.168.0.140:3000/}")"
         REG_TOKEN="$(ask "Registration token" "${PREFILL_TOKEN:-}")"
@@ -441,8 +594,8 @@ first_install_flow() {
   print_hr
   echo "First install: Gitea config (+install if missing) + generate token (CLI) + install runner"
   print_hr
-  gitea_server_flow     # sets PREFILL_INSTANCE_URL and maybe PREFILL_TOKEN
-  runner_flow           # installs if missing or lets you re-register
+  gitea_server_flow
+  runner_flow
 }
 
 # ===================== Smoke-test Workflow Printer =====================
@@ -481,6 +634,7 @@ main_menu() {
     echo "2) Runner: install if missing OR re-register existing"
     echo "3) Show smoke-test workflow snippet"
     echo "4) Ops tools (reconfigure/update/logs/net)"
+    echo "5) Fresh OS setup (root SSH + NM wifi profiles + RetroPie shutdown script) — auto 'No' & reboot"
     echo "q) Quit"
     echo "------------------------------------------"
     read -rp "> " choice
@@ -490,6 +644,7 @@ main_menu() {
       2) runner_flow ;;
       3) print_workflow_snippet ;;
       4) ops_tools_menu ;;
+      5) fresh_os_flow ;;
       q|Q) exit 0 ;;
       *) echo "Unknown option"; sleep 1 ;;
     esac
