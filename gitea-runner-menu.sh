@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
 # gitea-runner-menu.sh
-# All-in-one helper for Gitea server/runner + MySQL/MariaDB on Pi/Debian.
+# All-in-one helper for Gitea server/runner + MySQL/MariaDB + No-IP (DDNS) on Pi/Debian.
 set -euo pipefail
 
-# --- Ensure netcat is available for network checks (requested) ---
+# --- Ensure netcat is available for network checks ---
 sudo apt-get update -y >/dev/null 2>&1 || true
 sudo apt-get install -y netcat-openbsd >/dev/null 2>&1 || true
 
@@ -287,7 +287,6 @@ ops_tools_menu(){
         pause
         ;;
       6)
-        # Runner -> MySQL connectivity test (as service user)
         local DB_HOST DB_NAME DB_USER DB_PASS SVC_USER
         DB_HOST="$(ask "MySQL host/IP" "192.168.0.130")"
         DB_NAME="$(ask "Database name" "gitea")"
@@ -344,7 +343,107 @@ EOFSSHD
   pause
 }
 
-# --------- 6) Uninstall Gitea ----------
+# --------- 6) DNS (No-IP via ddclient) ----------
+dns_noip_menu(){
+  print_hr
+  echo "DNS (No-IP) Setup"
+  print_hr
+  while true; do
+    echo "1) Install/Configure No-IP (ddclient)"
+    echo "2) Force update now"
+    echo "3) Show ddclient service status"
+    echo "4) Uninstall No-IP (ddclient)"
+    echo "b) Back"
+    read -rp "> " dch
+    case "$dch" in
+      1)
+        local NOIP_USER NOIP_PASS NOIP_HOSTS INTERVAL
+        NOIP_USER="$(ask "No-IP username (email)" "")"
+        read -rsp "No-IP password: " NOIP_PASS; echo
+        NOIP_HOSTS="$(ask "Hostname(s) (comma-separated, e.g. myhost.ddns.net)" "")"
+        INTERVAL="$(ask "Update interval seconds" "300")"
+
+        [[ -n "$NOIP_USER" && -n "$NOIP_PASS" && -n "$NOIP_HOSTS" ]] || { status_err "All fields are required."; pause; continue; }
+
+        status_info "Installing ddclient..."
+        sudo apt-get update -y
+        sudo apt-get install -y ddclient
+
+        status_info "Writing /etc/ddclient.conf ..."
+        sudo tee /etc/ddclient.conf >/dev/null <<EOF
+# ddclient for No-IP
+protocol=dyndns2
+use=web, web=checkip.dyndns.com/, web-skip='IP Address'
+server=dynupdate.no-ip.com
+ssl=yes
+login=${NOIP_USER}
+password='${NOIP_PASS}'
+${NOIP_HOSTS}
+EOF
+
+        status_info "Enabling daemon mode..."
+        # Debian uses /etc/default/ddclient to control daemon
+        if [[ -f /etc/default/ddclient ]]; then
+          sudo sed -i 's/^run_daemon=.*/run_daemon="true"/' /etc/default/ddclient || true
+          sudo sed -i "s/^daemon=.*/daemon=${INTERVAL}/" /etc/default/ddclient || echo "daemon=${INTERVAL}" | sudo tee -a /etc/default/ddclient >/dev/null
+        else
+          sudo tee /etc/default/ddclient >/dev/null <<EOF
+run_daemon="true"
+daemon=${INTERVAL}
+syslog=yes
+# If your interface is special, set it; default is auto
+# pid=/var/run/ddclient.pid
+EOF
+        fi
+
+        status_info "Restarting ddclient..."
+        sudo systemctl enable ddclient
+        sudo systemctl restart ddclient
+
+        status_info "Forcing immediate update..."
+        sudo ddclient -force -verbose || true
+
+        status_ok "✅ No-IP (ddclient) installed & configured"
+        echo "Config: /etc/ddclient.conf"
+        pause
+        ;;
+      2)
+        status_info "Forcing ddclient update..."
+        if sudo ddclient -force -verbose; then
+          status_ok "✅ Update sent"
+        else
+          status_err "❌ Update failed (check credentials/hostname)"
+        fi
+        pause
+        ;;
+      3)
+        _systemctl_status ddclient
+        echo; status_info "Recent logs (syslog):"
+        (sudo tail -n 100 /var/log/syslog 2>/dev/null | grep -i ddclient || true)
+        pause
+        ;;
+      4)
+        status_warn "This will remove ddclient and its config."
+        local sure; sure="$(ask "Proceed? (yes/no)" "no")"
+        if [[ "$sure" =~ ^y(es)?$ ]]; then
+          sudo systemctl stop ddclient || true
+          sudo systemctl disable ddclient || true
+          sudo apt-get purge -y ddclient || true
+          sudo apt-get autoremove -y || true
+          sudo rm -f /etc/ddclient.conf /etc/default/ddclient
+          status_ok "✅ No-IP (ddclient) uninstalled"
+        else
+          echo "Aborted."
+        fi
+        pause
+        ;;
+      b|B) break ;;
+      *) echo "Unknown option"; sleep 1 ;;
+    esac
+  done
+}
+
+# --------- 7) Uninstall Gitea ----------
 uninstall_gitea_only(){
   print_hr; status_warn "Uninstall Gitea SERVER only"; local sure; sure="$(ask "Proceed? (yes/no)" "no")"
   [[ "$sure" =~ ^y(es)?$ ]] || { echo "Aborted."; pause; return 0; }
@@ -366,7 +465,7 @@ uninstall_gitea_only(){
   pause
 }
 
-# --------- 7) Uninstall Runner ----------
+# --------- 8) Uninstall Runner ----------
 uninstall_runner_only(){
   print_hr; status_warn "Uninstall Runner ONLY"; local sure; sure="$(ask "Proceed? (yes/no)" "no")"
   [[ "$sure" =~ ^y(es)?$ ]] || { echo "Aborted."; pause; return 0; }
@@ -384,7 +483,7 @@ uninstall_runner_only(){
   pause
 }
 
-# --------- 8) MySQL/MariaDB setup (Server / Client / Uninstall / Test Server / Test Client) ----------
+# --------- 9) MySQL/MariaDB setup ----------
 mysql_menu(){
   print_hr
   echo "MySQL/MariaDB Setup Manager"
@@ -544,7 +643,7 @@ EOF
         read -rp "Enter DB name: " DB_NAME
 
         status_info "Testing client DB connection (mysql -h $DB_HOST -u $DB_USER ... $DB_NAME)"
-        if mysql -h "$DB_HOST" -u "$DB_USER" -p"$DB_PASS" "$DB_NAME" -e "SELECT 1;" >/dev/null 2>&1; then
+        if mysql -h "$DB_HOST" -u "$DB_USER" -p"$DB_PASS" "$DB_NAME" -e "SELECT 1;" >/devnull 2>&1; then
           status_ok "✅ Client test OK"
         else
           status_err "❌ Client test FAILED"
@@ -568,9 +667,10 @@ main_menu(){
     echo "3) Show smoke-test workflow snippet"
     echo "4) Ops tools (reconfigure/update/logs/net + runner→MySQL test)"
     echo "5) SSHD Activate (enable password login; restart ssh)"
-    echo "6) Uninstall Gitea server"
-    echo "7) Uninstall runner"
-    echo "8) MySQL/MariaDB setup (Server / Client / Uninstall / Test Server / Test Client)"
+    echo "6) DNS (No-IP via ddclient)"
+    echo "7) Uninstall Gitea server"
+    echo "8) Uninstall runner"
+    echo "9) MySQL/MariaDB setup (Server / Client / Uninstall / Test Server / Test Client)"
     echo "q) Quit"
     echo "------------------------------------------"
     choice="$(ask "Choose an option" "")"
@@ -581,9 +681,10 @@ main_menu(){
       3) print_workflow_snippet ;;
       4) ops_tools_menu ;;
       5) sshd_activate_flow ;;
-      6) uninstall_gitea_only ;;
-      7) uninstall_runner_only ;;
-      8) mysql_menu ;;
+      6) dns_noip_menu ;;
+      7) uninstall_gitea_only ;;
+      8) uninstall_runner_only ;;
+      9) mysql_menu ;;
       q|Q) exit 0 ;;
       *) echo "Unknown option"; sleep 1 ;;
     esac
