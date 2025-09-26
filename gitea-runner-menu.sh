@@ -102,14 +102,6 @@ EOF
   pause
 }
 
-# --------- Runner presence check ----------
-runner_installed(){
-  if have_cmd act_runner; then return 0; fi
-  if systemctl list-unit-files 2>/dev/null | grep -q '^gitea-runner\.service'; then return 0; fi
-  if systemctl is-active gitea-runner >/dev/null 2>&1; then return 0; fi
-  return 1
-}
-
 # --------- 1) Install runner (install/re-register + restart) ----------
 install_runner(){
   print_hr
@@ -356,13 +348,13 @@ uninstall_runner_only(){
   pause
 }
 
-# --------- 8) MySQL/MariaDB setup (Server / Client / Uninstall / Test) ----------
+# --------- 8) MySQL/MariaDB setup (Server / Client / Uninstall / Test Server / Test Client) ----------
 mysql_menu(){
   print_hr
   echo "MySQL/MariaDB Setup Manager"
   print_hr
   PS3="Choose mode: "
-  select MODE in "Server" "Client" "Uninstall" "Test" "Back"; do
+  select MODE in "Server" "Client" "Uninstall" "Test Server" "Test Client" "Back"; do
     case "${MODE:-}" in
       Server)
         read -rp "Enter MySQL root password (will be set): " DB_ROOT_PASS
@@ -494,41 +486,37 @@ EOF
         fi
         pause
         ;;
-      Test)
-        echo "==> Choose test mode:"
-        select T in "Server-local" "Client-remote" "Back"; do
-          case "${T:-}" in
-            Server-local )
-              read -rsp "Enter local MySQL root password: " ROOTPW; echo
-              if mysql -u root -p"${ROOTPW}" -e "SHOW DATABASES;" >/dev/null 2>&1; then
-                status_ok "✅ Local server connection OK"
-              else
-                status_err "❌ Local server connection failed"
-              fi
-              ;;
-            Client-remote )
-              if [[ -f "$HOME/.config/client-app.ini" ]]; then
-                local HOST USER PASS NAME
-                HOST=$(grep -E '^HOST' "$HOME/.config/client-app.ini" | cut -d= -f2 | xargs)
-                USER=$(grep -E '^USER' "$HOME/.config/client-app.ini" | cut -d= -f2 | xargs)
-                PASS=$(grep -E '^PASSWD' "$HOME/.config/client-app.ini" | cut -d= -f2 | xargs)
-                NAME=$(grep -E '^NAME' "$HOME/.config/client-app.ini" | cut -d= -f2 | xargs)
-                if mysql -u "$USER" -p"$PASS" -h "${HOST%:*}" "$NAME" -e "SELECT 1;" >/dev/null 2>&1; then
-                  status_ok "✅ Remote client connection OK"
-                else
-                  status_err "❌ Remote client connection failed"
-                fi
-              else
-                status_err "❌ No $HOME/.config/client-app.ini found. Run Client setup first."
-              fi
-              ;;
-            Back ) break ;;
-            * ) echo "Invalid choice";;
-          esac
-        done
+      "Test Server")
+        read -rp "Enter DB host (default 127.0.0.1): " DB_HOST
+        DB_HOST="${DB_HOST:-127.0.0.1}"
+        read -rp "Enter DB user: " DB_USER
+        read -rsp "Enter DB password: " DB_PASS; echo
+        read -rp "Enter DB name: " DB_NAME
+
+        status_info "Testing server DB connection (mysql -h $DB_HOST -u $DB_USER ... $DB_NAME)"
+        if mysql -h "$DB_HOST" -u "$DB_USER" -p"$DB_PASS" "$DB_NAME" -e "SELECT 1;" >/dev/null 2>&1; then
+          status_ok "✅ Server test OK"
+        else
+          status_err "❌ Server test FAILED"
+        fi
+        pause
+        ;;
+      "Test Client")
+        read -rp "Enter DB host/IP: " DB_HOST
+        read -rp "Enter DB user: " DB_USER
+        read -rsp "Enter DB password: " DB_PASS; echo
+        read -rp "Enter DB name: " DB_NAME
+
+        status_info "Testing client DB connection (mysql -h $DB_HOST -u $DB_USER ... $DB_NAME)"
+        if mysql -h "$DB_HOST" -u "$DB_USER" -p"$DB_PASS" "$DB_NAME" -e "SELECT 1;" >/dev/null 2>&1; then
+          status_ok "✅ Client test OK"
+        else
+          status_err "❌ Client test FAILED"
+        fi
+        pause
         ;;
       Back) break ;;
-      * ) echo "Invalid choice";;
+      *) echo "Invalid choice";;
     esac
   done
 }
@@ -546,7 +534,7 @@ main_menu(){
     echo "5) SSHD Activate (enable password login; restart ssh)"
     echo "6) Uninstall Gitea server"
     echo "7) Uninstall runner"
-    echo "8) MySQL/MariaDB setup (Server / Client / Uninstall / Test)"
+    echo "8) MySQL/MariaDB setup (Server / Client / Uninstall / Test Server / Test Client)"
     echo "q) Quit"
     echo "------------------------------------------"
     choice="$(ask "Choose an option" "")"
