@@ -29,6 +29,16 @@ _systemctl() { (sudo systemctl "$@" 2>/dev/null) || (systemctl --user "$@" 2>/de
 _systemctl_status() { _systemctl status "$@" --no-pager || true; }
 _journal_tail() { (sudo journalctl -u "$1" -n "${2:-200}" --no-pager 2>/dev/null) || true; }
 
+# Resolve runner service user from systemd unit (fallback to $USER)
+get_runner_user() {
+  local unit="/etc/systemd/system/gitea-runner.service"
+  if [[ -f "$unit" ]] && grep -qE '^[[:space:]]*User=' "$unit"; then
+    grep -E '^[[:space:]]*User=' "$unit" | tail -n1 | cut -d= -f2 | xargs
+  else
+    echo "${USER}"
+  fi
+}
+
 # --------- 0) Install Gitea server & configs ----------
 install_gitea_server(){
   print_hr
@@ -115,7 +125,7 @@ install_runner(){
   RUNNER_LABELS="$(ask "Runner labels" "self-hosted,linux,arm64,pi,${RUNNER_NAME}")"
   RUNNER_VERSION="$(ask "act_runner version" "0.2.10")"
   INSTALL_DIR="$(ask "Install dir for act_runner" "/usr/local/bin")"
-  SERVICE_USER="$(ask "Systemd service user" "$USER")"
+  SERVICE_USER="$(ask "Systemd service user" "$(get_runner_user)")"
   [[ -n "$REG_TOKEN" ]] || { status_err "REG_TOKEN is required."; pause; return 1; }
 
   if ! have_cmd act_runner; then
@@ -144,9 +154,9 @@ Wants=network-online.target
 [Service]
 User=${SERVICE_USER}
 Group=${SERVICE_USER}
-Environment=HOME=$HOME
-Environment=XDG_CONFIG_HOME=$HOME/.config
-WorkingDirectory=$HOME
+Environment=HOME=/home/${SERVICE_USER}
+Environment=XDG_CONFIG_HOME=/home/${SERVICE_USER}/.config
+WorkingDirectory=/home/${SERVICE_USER}
 ExecStart=${INSTALL_DIR}/act_runner daemon
 Restart=always
 RestartSec=2s
@@ -239,6 +249,7 @@ ops_tools_menu(){
     echo "3) Show runner service status"
     echo "4) Tail runner logs (last 200 lines)"
     echo "5) Network checks to Gitea (curl + nc)"
+    echo "6) Runner → MySQL connectivity test (run as service user)"
     echo "b) Back"
     read -rp "> " op
     case "$op" in
@@ -273,6 +284,31 @@ ops_tools_menu(){
         port="$(ask "Gitea HTTP port" "3000")"
         echo "curl check:"; curl -I "http://${ip}:${port}/" || echo "cannot reach :${port}"
         echo "nc check:"; nc -vz "$ip" "$port" || true
+        pause
+        ;;
+      6)
+        # Runner -> MySQL connectivity test (as service user)
+        local DB_HOST DB_NAME DB_USER DB_PASS SVC_USER
+        DB_HOST="$(ask "MySQL host/IP" "192.168.0.130")"
+        DB_NAME="$(ask "Database name" "gitea")"
+        DB_USER="$(ask "DB username" "gitea")"
+        read -rsp "DB password: " DB_PASS; echo
+        SVC_USER="$(ask "Runner service user (detected)" "$(get_runner_user)")"
+
+        status_info "Ensuring mariadb-client is installed..."
+        sudo apt-get update -y >/dev/null 2>&1 || true
+        sudo apt-get install -y mariadb-client >/dev/null 2>&1 || true
+
+        status_info "Testing as user '${SVC_USER}' ..."
+        if sudo -u "${SVC_USER}" bash -lc "mysql -h '${DB_HOST}' -u '${DB_USER}' -p'${DB_PASS}' '${DB_NAME}' -e 'SELECT 1;'" >/dev/null 2>&1; then
+          status_ok "✅ Runner (${SVC_USER}) can reach MySQL @ ${DB_HOST} and auth to DB '${DB_NAME}'"
+        else
+          status_err "❌ Runner (${SVC_USER}) could not connect. Check bind-address, firewall, grants, password."
+          echo "Hints:"
+          echo "  - On DB server: /etc/mysql/mariadb.conf.d/50-server.cnf -> # bind-address = 127.0.0.1 ; then restart mariadb"
+          echo "  - Grants: CREATE USER 'user'@'%' IDENTIFIED BY 'pass'; GRANT ALL ON db.* TO 'user'@'%'; FLUSH PRIVILEGES;"
+          echo "  - Network: nc -vz ${DB_HOST} 3306"
+        fi
         pause
         ;;
       b|B) break ;;
@@ -530,7 +566,7 @@ main_menu(){
     echo "1) Install runner"
     echo "2) Runner hook to Gitea"
     echo "3) Show smoke-test workflow snippet"
-    echo "4) Ops tools (reconfigure/update/logs/net)"
+    echo "4) Ops tools (reconfigure/update/logs/net + runner→MySQL test)"
     echo "5) SSHD Activate (enable password login; restart ssh)"
     echo "6) Uninstall Gitea server"
     echo "7) Uninstall runner"
