@@ -1,11 +1,14 @@
 #!/usr/bin/env bash
 # gitea-runner-menu.sh
-# All-in-one menu:
-#  - First install: configure Gitea (+install if missing) → generate token (CLI) → install runner
-#  - Gitea: install if missing, enable Actions, set ROOT_URL, restart, optional token generation
-#  - Runner: install if missing (interactive) OR re-register existing
-#  - Fresh OS: root SSH enable + root password prompt + NM Wi-Fi profiles (5 manual inputs) + RetroPie shutdown script (auto "No") + final summary + reboot
-#  - Ops tools: reconfigure/update runner, status, logs, network checks
+# Menu wired per request:
+# 0) Install Gitea server configs  — install if missing, write configs, enable Actions, set ROOT_URL, restart, health check
+# 1) Install runner                — install act_runner if missing OR re-register existing, restart service
+# 2) Runner hook to Gitea          — register this runner to a Gitea instance (token/URL/name/labels), restart service
+# 3) Smoke-test workflow snippet
+# 4) Ops tools (reconfigure/update/logs/net)
+# 5) SSHD Activate (enable password login; restart ssh)
+# 6) Uninstall Gitea (server only)
+# 7) Uninstall Runner (act_runner only)
 # Raspberry Pi OS / Debian-friendly (ARM64). Run as a regular user with sudo available.
 
 set -euo pipefail
@@ -24,14 +27,6 @@ ask() {
     read -rp "$prompt: " reply || true
     echo "${reply}"
   fi
-}
-prompt_nonempty() {
-  local prompt="${1:-}" val=""
-  while true; do
-    read -rp "$prompt" val || true
-    [[ -n "$val" ]] && { echo "$val"; return 0; }
-    echo "Value cannot be empty."
-  done
 }
 pause() { read -rp "Press Enter to continue..." || true; }
 have_cmd() { command -v "$1" >/dev/null 2>&1; }
@@ -94,37 +89,17 @@ EOF
   status_ok "Gitea installed ✅  Visit: http://<your-raspi-ip>:3000"
 }
 
-# ===================== Token Generation via Gitea CLI =====================
-REG_TOKEN_OUT=""
-gitea_generate_token_cli() {
-  local cfg_path="$1"
-  REG_TOKEN_OUT=""
-  if ! have_cmd gitea; then
-    status_warn "Gitea CLI not on PATH; cannot auto-generate token."
-    return 1
-  fi
-  status_info "Generating runner registration token via Gitea CLI..."
-  if REG_TOKEN_OUT="$(sudo gitea --config "$cfg_path" actions generate-runner-token 2>/dev/null)"; then
-    status_ok "Registration Token:"
-    echo "$REG_TOKEN_OUT"
-    return 0
-  else
-    status_err "Failed to generate token via CLI (binary/permissions?)."
-    return 1
-  fi
-}
-
-# ===================== Gitea Configure (enable Actions + ROOT_URL) =====================
-gitea_server_flow() {
+# ===================== 0) Install Gitea server configs =====================
+install_gitea_server_configs() {
   print_hr
-  echo "Gitea server setup (install if missing, enable Actions, set ROOT_URL, restart, optional token)"
+  echo "Install Gitea server configs: install if missing, write config, enable Actions, set ROOT_URL, restart, health check"
   print_hr
 
   if ! have_cmd gitea; then
     gitea_bootstrap_install
   fi
 
-  # Detect an existing config or default to /var/lib/gitea/custom/conf/app.ini
+  # Detect or default config path
   local default_cfg=""
   if   [[ -f /etc/gitea/app.ini ]]; then default_cfg="/etc/gitea/app.ini"
   elif [[ -f /etc/gitea/conf/app.ini ]]; then default_cfg="/etc/gitea/conf/app.ini"
@@ -136,6 +111,7 @@ gitea_server_flow() {
   sudo mkdir -p "$(dirname "$cfg_path")"
   sudo touch "$cfg_path"
 
+  # IP/URL basics
   local ip port proto
   ip="$(ask "Gitea host/IP for ROOT_URL" "192.168.0.140")"
   port="$(ask "Gitea HTTP port" "3000")"
@@ -195,9 +171,7 @@ gitea_server_flow() {
   sudo rm -f "${cfg_path}.tmp"
 
   status_info "Restarting Gitea ..."
-  if have_cmd systemctl; then
-    sudo systemctl restart gitea || status_warn "systemctl restart failed; start service manually if needed."
-  fi
+  sudo systemctl restart gitea || status_warn "systemctl restart failed; start service manually if needed."
 
   status_info "Health check ${root_url} ..."
   if curl -sfL "${root_url}" -o /dev/null; then
@@ -206,32 +180,26 @@ gitea_server_flow() {
     status_err "Gitea not reachable ❌ (firewall/ports/service logs?)"
   fi
 
-  local do_gen
-  do_gen="$(ask "Generate a runner registration token now (CLI)? (yes/no)" "yes")"
-  if [[ "$do_gen" =~ ^y(es)?$ ]]; then
-    if gitea_generate_token_cli "$cfg_path"; then
-      PREFILL_TOKEN="$(echo "$REG_TOKEN_OUT" | tr -d '\r\n')"
-      status_info "Saved token for this session."
-    else
-      status_warn "Could not generate token automatically. You can copy one from the Web UI."
-    fi
-  else
-    status_info "Skipping auto token generation."
-  fi
-
   pause
 }
 
-# ===================== Runner Install (if missing) =====================
-runner_bootstrap_install_interactive() {
+# ===================== Runner presence check =====================
+runner_installed() {
+  if have_cmd act_runner; then return 0; fi
+  if systemctl list-unit-files 2>/dev/null | grep -q '^gitea-runner\.service'; then return 0; fi
+  if systemctl is-active gitea-runner >/dev/null 2>&1; then return 0; fi
+  return 1
+}
+
+# ===================== 1) Install runner =====================
+install_runner() {
   print_hr
-  echo "Runner not found — installing and registering act_runner"
+  echo "Install runner: install act_runner if missing OR re-register existing, then restart service"
   print_hr
 
-  # ======== Interactive inputs ========
   local INSTANCE_URL REG_TOKEN RUNNER_NAME RUNNER_LABELS RUNNER_VERSION INSTALL_DIR SERVICE_USER
   INSTANCE_URL="$(ask "INSTANCE_URL" "${PREFILL_INSTANCE_URL:-http://192.168.0.140:3000/}")"
-  REG_TOKEN="$(ask "Registration token" "${PREFILL_TOKEN:-}")"
+  REG_TOKEN="$(ask "Registration token (paste from Gitea UI or CLI)" "${PREFILL_TOKEN:-}")"
   RUNNER_NAME="$(ask "Runner name" "runner")"
   RUNNER_LABELS="$(ask "Runner labels (comma-separated)" "self-hosted,linux,arm64,pi")"
   RUNNER_VERSION="$(ask "act_runner version" "0.2.10")"
@@ -239,23 +207,26 @@ runner_bootstrap_install_interactive() {
   SERVICE_USER="$(ask "Systemd service user" "$USER")"
 
   if [[ -z "$REG_TOKEN" ]]; then
-    status_err "REG_TOKEN is required to register the runner."
-    return 1
+    status_err "REG_TOKEN is required."
+    pause; return 1
   fi
 
-  # ======== Install prerequisites ========
-  status_info "Updating system & installing dependencies ..."
+  # Install deps
   sudo apt-get update -y
   sudo apt-get install -y curl unzip
 
-  # ======== Install act_runner ========
-  status_info "Installing act_runner ${RUNNER_VERSION} ..."
-  curl -L "https://gitea.com/gitea/act_runner/releases/download/v${RUNNER_VERSION}/act_runner-${RUNNER_VERSION}-linux-arm64" -o /tmp/act_runner
-  chmod +x /tmp/act_runner
-  sudo mv /tmp/act_runner "${INSTALL_DIR}/act_runner"
+  # Install act_runner if not present
+  if ! have_cmd act_runner; then
+    status_info "Installing act_runner ${RUNNER_VERSION} ..."
+    curl -L "https://gitea.com/gitea/act_runner/releases/download/v${RUNNER_VERSION}/act_runner-${RUNNER_VERSION}-linux-arm64" -o /tmp/act_runner
+    chmod +x /tmp/act_runner
+    sudo mv /tmp/act_runner "${INSTALL_DIR}/act_runner"
+  else
+    status_info "act_runner already present."
+  fi
 
-  # ======== Register runner ========
-  status_info "Registering runner ..."
+  # (Re)register
+  status_info "Registering runner to ${INSTANCE_URL} ..."
   mkdir -p "$HOME/.config/act_runner"
   "${INSTALL_DIR}/act_runner" register \
     --instance "${INSTANCE_URL}" \
@@ -263,8 +234,8 @@ runner_bootstrap_install_interactive() {
     --name "${RUNNER_NAME}" \
     --labels "${RUNNER_LABELS}"
 
-  # ======== Create systemd service ========
-  status_info "Creating systemd service gitea-runner.service ..."
+  # Create/refresh service
+  status_info "Creating/updating systemd service gitea-runner.service ..."
   sudo tee /etc/systemd/system/gitea-runner.service >/dev/null <<EOF
 [Unit]
 Description=Gitea Actions Runner
@@ -285,102 +256,65 @@ RestartSec=2s
 WantedBy=multi-user.target
 EOF
 
-  status_info "Enabling & starting service ..."
   sudo systemctl daemon-reload
   sudo systemctl enable gitea-runner
-  sudo systemctl start gitea-runner
+  sudo systemctl restart gitea-runner
 
-  status_ok "✅ Done! Runner installed and started."
-  echo "Check logs:  journalctl -u gitea-runner -f"
-  pause
-}
-
-runner_installed() {
-  # Consider installed if act_runner exists OR a service exists/active
-  if have_cmd act_runner; then return 0; fi
-  if systemctl list-unit-files 2>/dev/null | grep -q '^gitea-runner\.service'; then return 0; fi
-  if systemctl is-active gitea-runner >/dev/null 2>&1; then return 0; fi
-  return 1
-}
-
-# ===================== Runner Flow =====================
-runner_flow() {
-  print_hr
-  echo "Runner install / register"
-  print_hr
-
-  if ! runner_installed; then
-    runner_bootstrap_install_interactive
-    print_hr
-    status_info "Service status:"
-    _systemctl_status gitea-runner
-    echo
-    status_info "Recent logs:"
-    _journal_tail gitea-runner 200
-    pause
-    return 0
-  fi
-
-  status_ok "act_runner appears to be installed already."
+  status_ok "Runner installed/registered and service restarted ✅"
   _systemctl_status gitea-runner
-  echo
-
-  local re_reg
-  re_reg="$(ask "Re-register this runner with a new token/name/labels? (yes/no)" "no")"
-  if [[ "$re_reg" =~ ^y(es)?$ ]]; then
-    status_info "Stopping runner service ..."
-    sudo systemctl stop gitea-runner || true
-    status_info "Wiping previous runner config (~/.config/act_runner) ..."
-    rm -rf "$HOME/.config/act_runner" 2>/dev/null || true
-
-    local INSTANCE_URL REG_TOKEN RUNNER_NAME RUNNER_LABELS
-    INSTANCE_URL="$(ask "INSTANCE_URL" "${PREFILL_INSTANCE_URL:-http://192.168.0.140:3000/}")"
-    REG_TOKEN="$(ask "Registration token" "${PREFILL_TOKEN:-}")"
-    RUNNER_NAME="$(ask "Runner name" "runner-pi")"
-    RUNNER_LABELS="$(ask "Runner labels" "self-hosted,linux,arm64,pi,${RUNNER_NAME}")"
-
-    if [[ -z "$REG_TOKEN" ]]; then
-      status_err "REG_TOKEN is required to register."
-      pause; return 1
-    fi
-
-    status_info "Re-registering runner ..."
-    act_runner register \
-      --instance "${INSTANCE_URL}" \
-      --token "${REG_TOKEN}" \
-      --name "${RUNNER_NAME}" \
-      --labels "${RUNNER_LABELS}"
-
-    status_info "Starting runner service ..."
-    sudo systemctl start gitea-runner || true
-    status_ok "Re-registration complete ✅"
-  fi
-
-  echo
-  status_info "Recent logs:"
-  _journal_tail gitea-runner 200
+  echo; status_info "Recent logs:"; _journal_tail gitea-runner 60
   pause
 }
 
-# ===================== Fresh OS Setup (5 manual inputs + summary) =====================
-fresh_os_flow() {
+# ===================== 2) Runner hook to Gitea (register only) =====================
+runner_hook_to_gitea() {
   print_hr
-  echo "Fresh OS setup: enable root SSH, set root password,"
-  echo "configure NetworkManager Wi-Fi (manual SSID/PSK/IP/GW/DNS),"
-  echo "install RetroPie shutdown script (auto 'No'), then show summary and reboot."
+  echo "Runner hook to Gitea: register this runner to a Gitea instance and restart service"
   print_hr
 
-  # Constants
-  local REPO_ZIP_URL="https://github.com/AirysDark/Retropie-shutdown-sccript/archive/refs/heads/main.zip"
-  local REPO_ZIP_NAME="main.zip"
-  local REPO_DIR_NAME="Retropie-shutdown-sccript-main"
+  if ! have_cmd act_runner; then
+    status_err "act_runner binary not found. Run option 1 (Install runner) first."
+    pause; return 1
+  fi
+
+  local INSTANCE_URL REG_TOKEN RUNNER_NAME RUNNER_LABELS INSTALL_DIR
+  INSTANCE_URL="$(ask "INSTANCE_URL" "${PREFILL_INSTANCE_URL:-http://192.168.0.140:3000/}")"
+  REG_TOKEN="$(ask "Registration token" "${PREFILL_TOKEN:-}")"
+  RUNNER_NAME="$(ask "Runner name" "runner")"
+  RUNNER_LABELS="$(ask "Runner labels (comma-separated)" "self-hosted,linux,arm64,pi,${RUNNER_NAME}")"
+  INSTALL_DIR="$(dirname "$(command -v act_runner)")"
+
+  if [[ -z "$REG_TOKEN" ]]; then
+    status_err "REG_TOKEN is required."
+    pause; return 1
+  fi
+
+  status_info "Stopping runner service (if running) ..."
+  sudo systemctl stop gitea-runner || true
+  rm -rf "$HOME/.config/act_runner" 2>/dev/null || true
+
+  status_info "Registering to ${INSTANCE_URL} ..."
+  "${INSTALL_DIR}/act_runner" register \
+    --instance "${INSTANCE_URL}" \
+    --token "${REG_TOKEN}" \
+    --name "${RUNNER_NAME}" \
+    --labels "${RUNNER_LABELS}"
+
+  status_info "Starting runner service ..."
+  sudo systemctl start gitea-runner || true
+  status_ok "Runner hooked to Gitea ✅"
+  _systemctl_status gitea-runner
+  echo; status_info "Recent logs:"; _journal_tail gitea-runner 60
+  pause
+}
+
+# ===================== SSHD Activate (enable password login) =====================
+sshd_activate_flow() {
+  print_hr
+  echo "SSHD Activate: write minimal sshd_config to allow password login (incl. root), then restart SSH."
+  print_hr
+
   local SSH_CONFIG_PATH="/etc/ssh/sshd_config"
-  local NM_DIR="/etc/NetworkManager/system-connections"
-  local NM_FILE_A="${NM_DIR}/preconfigured.nmconnection.WAGSD3"
-  local NM_FILE_B="${NM_DIR}/preconfigured.nmconnection"
-  local UUID_VALUE="0bf0601a-749f-4c2c-893c-7ba5a9758d08"
-
-  # Templates
   read -r -d '' SSHD_CONFIG_CONTENT <<"EOFSSHD"
 PermitRootLogin yes
 PasswordAuthentication yes
@@ -392,156 +326,83 @@ AcceptEnv LANG LC_*
 Subsystem sftp /usr/lib/openssh/sftp-server
 EOFSSHD
 
-  read -r -d '' NM_TEMPLATE <<"EOFNM"
-[connection]
-id=preconfigured
-uuid=UUID_PLACEHOLDER
-type=wifi
-timestamp=1747095304
-
-[wifi]
-hidden=true
-mode=infrastructure
-ssid=SSID_PLACEHOLDER
-
-[wifi-security]
-key-mgmt=wpa-psk
-psk=PSK_PLACEHOLDER
-
-[ipv4]
-address1=IPV4_ADDR_PLACEHOLDER,IPV4_GW_PLACEHOLDER
-dns=IPV4_DNS_PLACEHOLDER;
-method=manual
-
-[ipv6]
-addr-gen-mode=default
-method=auto
-
-[proxy]
-EOFNM
-
-  read -r -d '' NM_TEMPLATE_B <<"EOFNM2"
-[connection]
-id=preconfigured
-uuid=UUID_PLACEHOLDER
-type=wifi
-timestamp=1758798433
-
-[wifi]
-hidden=true
-mode=infrastructure
-ssid=SSID_PLACEHOLDER
-
-[wifi-security]
-key-mgmt=wpa-psk
-psk=PSK_PLACEHOLDER
-
-[ipv4]
-address1=IPV4_ADDR_PLACEHOLDER,IPV4_GW_PLACEHOLDER
-dns=IPV4_DNS_PLACEHOLDER;
-method=manual
-
-[ipv6]
-addr-gen-mode=default
-method=auto
-
-[proxy]
-EOFNM2
-
-  # Ensure packages
-  status_info "Installing prerequisites (wget, unzip, passwd, network-manager)..."
-  sudo apt-get update -y
-  sudo apt-get install -y wget unzip passwd network-manager
-
-  # Enable root SSH
-  status_info "Configuring SSHD to permit root login..."
+  status_info "Backing up current sshd_config (if exists)..."
   if [[ -f "$SSH_CONFIG_PATH" ]]; then
     sudo cp -a "$SSH_CONFIG_PATH" "$SSH_CONFIG_PATH.bak.$(date +%Y%m%d%H%M%S)"
   fi
+
+  status_info "Writing new sshd_config..."
   echo "$SSHD_CONFIG_CONTENT" | sudo tee "$SSH_CONFIG_PATH" >/dev/null
+
+  status_info "Restarting SSH service..."
   sudo systemctl restart ssh 2>/dev/null || sudo systemctl restart sshd 2>/dev/null || true
-  status_ok "[OK] SSH restarted."
 
-  # Root password (hidden)
-  status_info "Set root password (input hidden)."
-  local ROOTPASS ROOTPASS2
-  while true; do
-    read -s -p "Enter new root password: " ROOTPASS; echo
-    read -s -p "Confirm root password: " ROOTPASS2; echo
-    if [[ "$ROOTPASS" == "$ROOTPASS2" && -n "$ROOTPASS" ]]; then
-      echo "root:$ROOTPASS" | sudo chpasswd
-      status_ok "[OK] Root password updated."
-      break
-    else
-      status_err "Passwords do not match or are empty. Try again."
+  status_ok "SSHD activated ✅  (PasswordAuthentication=yes, PermitRootLogin=yes)"
+  echo "Edit if needed: $SSH_CONFIG_PATH"
+  pause
+}
+
+# ===================== Uninstallers =====================
+uninstall_gitea_only() {
+  print_hr
+  status_warn "You are about to uninstall Gitea SERVER only (runner unaffected)."
+  local sure; sure="$(ask "Proceed? (yes/no)" "no")"
+  [[ "$sure" =~ ^y(es)?$ ]] || { echo "Aborted."; pause; return 0; }
+
+  echo "==> Stopping/disabling gitea..."
+  sudo systemctl stop gitea || true
+  sudo systemctl disable gitea || true
+
+  echo "==> Removing gitea service file..."
+  sudo rm -f /etc/systemd/system/gitea.service
+
+  echo "==> Removing gitea binary..."
+  sudo rm -f /usr/local/bin/gitea
+
+  echo "==> Removing gitea configs/data..."
+  sudo rm -rf /etc/gitea
+  sudo rm -rf /var/lib/gitea
+
+  echo "==> (Optional) Removing Gitea user 'git'..."
+  if id "git" &>/dev/null; then
+    local del; del="$(ask "Delete 'git' user and its home? (yes/no)" "no")"
+    if [[ "$del" =~ ^y(es)?$ ]]; then
+      sudo deluser --remove-home git || true
     fi
-  done
+  fi
 
-  # ======== 5 manual inputs (Wi-Fi + IPv4) ========
-  local SSID_VALUE PSK_VALUE IPV4_ADDR IPV4_GW IPV4_DNS
-  SSID_VALUE="$(prompt_nonempty "Wi-Fi SSID: ")"
-  PSK_VALUE="$(prompt_nonempty "Wi-Fi PSK: ")"
-  IPV4_ADDR="$(prompt_nonempty "IPv4 address with CIDR (e.g. 192.168.0.140/24): ")"
-  IPV4_GW="$(prompt_nonempty "Gateway (e.g. 192.168.0.1): ")"
-  IPV4_DNS="$(prompt_nonempty "DNS server (e.g. 192.168.0.1): ")"
+  echo "==> Reloading systemd..."
+  sudo systemctl daemon-reload
 
-  # Build NM files
-  local NM_CONTENT_A NM_CONTENT_B
-  NM_CONTENT_A="${NM_TEMPLATE//UUID_PLACEHOLDER/$UUID_VALUE}"
-  NM_CONTENT_A="${NM_CONTENT_A//SSID_PLACEHOLDER/$SSID_VALUE}"
-  NM_CONTENT_A="${NM_CONTENT_A//PSK_PLACEHOLDER/$PSK_VALUE}"
-  NM_CONTENT_A="${NM_CONTENT_A//IPV4_ADDR_PLACEHOLDER/$IPV4_ADDR}"
-  NM_CONTENT_A="${NM_CONTENT_A//IPV4_GW_PLACEHOLDER/$IPV4_GW}"
-  NM_CONTENT_A="${NM_CONTENT_A//IPV4_DNS_PLACEHOLDER/$IPV4_DNS}"
+  status_ok "✅ Gitea server uninstalled."
+  pause
+}
 
-  NM_CONTENT_B="${NM_TEMPLATE_B//UUID_PLACEHOLDER/$UUID_VALUE}"
-  NM_CONTENT_B="${NM_CONTENT_B//SSID_PLACEHOLDER/$SSID_VALUE}"
-  NM_CONTENT_B="${NM_CONTENT_B//PSK_PLACEHOLDER/$PSK_VALUE}"
-  NM_CONTENT_B="${NM_CONTENT_B//IPV4_ADDR_PLACEHOLDER/$IPV4_ADDR}"
-  NM_CONTENT_B="${NM_CONTENT_B//IPV4_GW_PLACEHOLDER/$IPV4_GW}"
-  NM_CONTENT_B="${NM_CONTENT_B//IPV4_DNS_PLACEHOLDER/$IPV4_DNS}"
-
-  sudo mkdir -p "$NM_DIR"
-  echo "$NM_CONTENT_A" | sudo tee "$NM_FILE_A" >/dev/null
-  echo "$NM_CONTENT_B" | sudo tee "$NM_FILE_B" >/dev/null
-  sudo chown root:root "$NM_FILE_A" "$NM_FILE_B"
-  sudo chmod 600 "$NM_FILE_A" "$NM_FILE_B"
-  sudo systemctl reload NetworkManager 2>/dev/null || true
-  sudo nmcli connection reload 2>/dev/null || true
-  status_ok "[OK] Network profiles written."
-
-  # RetroPie shutdown script: auto-select "No"
-  status_info "Installing RetroPie shutdown script (auto-select 'No')..."
-  local TMPDIR2
-  TMPDIR2="$(mktemp -d)"
-  pushd "$TMPDIR2" >/dev/null
-  wget -O "$REPO_ZIP_NAME" "$REPO_ZIP_URL"
-  unzip -o "$REPO_ZIP_NAME" >/dev/null
-  cd "$REPO_DIR_NAME"
-  printf 'n\n' | sudo sh install.sh retropie
-  popd >/dev/null
-  rm -rf "$TMPDIR2"
-
-  # ======== Final summary ========
+uninstall_runner_only() {
   print_hr
-  echo "SUMMARY (review before reboot)"
-  print_hr
-  echo " Root password:    [hidden]"
-  echo " Wi-Fi SSID:       $SSID_VALUE"
-  echo " Wi-Fi PSK:        $PSK_VALUE"
-  echo " IPv4 Address:     $IPV4_ADDR"
-  echo " Gateway:          $IPV4_GW"
-  echo " DNS:              $IPV4_DNS"
-  echo "------------------------------------------"
-  echo "Manual edit locations:"
-  echo " - SSH config: $SSH_CONFIG_PATH"
-  echo " - Network:    $NM_FILE_A"
-  echo "               $NM_FILE_B"
-  echo "------------------------------------------"
-  read -rp "Press ENTER to reboot now (or Ctrl+C to cancel and edit files manually)..." _
+  status_warn "You are about to uninstall the Gitea Runner ONLY (server unaffected)."
+  local sure; sure="$(ask "Proceed? (yes/no)" "no")"
+  [[ "$sure" =~ ^y(es)?$ ]] || { echo "Aborted."; pause; return 0; }
 
-  status_ok "Rebooting..."
-  sudo reboot || sudo shutdown -r now
+  echo "==> Stopping/disabling gitea-runner..."
+  sudo systemctl stop gitea-runner || true
+  sudo systemctl disable gitea-runner || true
+
+  echo "==> Removing runner service file..."
+  sudo rm -f /etc/systemd/system/gitea-runner.service
+
+  echo "==> Removing runner binary..."
+  sudo rm -f /usr/local/bin/act_runner
+
+  echo "==> Removing runner config..."
+  sudo rm -rf /home/*/.config/act_runner
+  [[ -n "${HOME:-}" ]] && rm -rf "$HOME/.config/act_runner" 2>/dev/null || true
+
+  echo "==> Reloading systemd..."
+  sudo systemctl daemon-reload
+
+  status_ok "✅ Gitea runner uninstalled."
+  pause
 }
 
 # ===================== Ops Tools (Reconfigure, Update, Net Checks) =====================
@@ -616,15 +477,6 @@ ops_tools_menu() {
   done
 }
 
-# ===================== First Install (Recommended) =====================
-first_install_flow() {
-  print_hr
-  echo "First install: Gitea config (+install if missing) + generate token (CLI) + install runner"
-  print_hr
-  gitea_server_flow
-  runner_flow
-}
-
 # ===================== Smoke-test Workflow Printer =====================
 print_workflow_snippet() {
   print_hr
@@ -656,22 +508,26 @@ main_menu() {
   while true; do
     clear || true
     echo "========== Gitea / Runner Setup =========="
-    echo "0) First install: Gitea config + generate token (CLI) + install runner"
-    echo "1) Gitea (server): install if missing, enable Actions, set ROOT_URL, restart, optional token"
-    echo "2) Runner: install if missing OR re-register existing"
+    echo "0) Install Gitea server configs"
+    echo "1) Install runner"
+    echo "2) Runner hook to Gitea"
     echo "3) Show smoke-test workflow snippet"
     echo "4) Ops tools (reconfigure/update/logs/net)"
-    echo "5) Fresh OS setup (root SSH + Wi-Fi SSID/PSK + IPv4/GW/DNS) — auto 'No' RetroPie + summary + reboot"
+    echo "5) SSHD Activate (enable password login; restart ssh)"
+    echo "6) Uninstall Gitea (server only)"
+    echo "7) Uninstall Runner (act_runner only)"
     echo "q) Quit"
     echo "------------------------------------------"
     read -rp "> " choice
     case "$choice" in
-      0) first_install_flow ;;
-      1) gitea_server_flow ;;
-      2) runner_flow ;;
+      0) install_gitea_server_configs ;;
+      1) install_runner ;;
+      2) runner_hook_to_gitea ;;
       3) print_workflow_snippet ;;
       4) ops_tools_menu ;;
-      5) fresh_os_flow ;;
+      5) sshd_activate_flow ;;
+      6) uninstall_gitea_only ;;
+      7) uninstall_runner_only ;;
       q|Q) exit 0 ;;
       *) echo "Unknown option"; sleep 1 ;;
     esac
