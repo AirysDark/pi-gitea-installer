@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # gitea-runner-menu.sh
-# Menu-driven helper for installing/uninstalling Gitea server and runners on Pi/Debian.
+# Menu-driven helper for installing/uninstalling Gitea server & runners on Pi/Debian,
+# with Ops tools, SSHD activation, and MySQL/MariaDB setup (server/client/uninstall).
 set -euo pipefail
 
 # --------- Helpers ----------
@@ -71,7 +72,8 @@ EOF
   proto="$(ask "Protocol" "http")"
   local root_url="${proto}://${ip}:${port}/"
 
-  sudo mkdir -p /etc/gitea
+  sudo mkdir -p /etc/gitea /var/lib/gitea/custom/conf
+  # Write /etc/gitea/app.ini (also keep Actions enabled here)
   sudo tee /etc/gitea/app.ini >/dev/null <<EOF
 [server]
 PROTOCOL  = http
@@ -82,6 +84,10 @@ ROOT_URL  = ${root_url}
 [actions]
 ENABLED = true
 EOF
+  # Mirror to the path the service uses
+  sudo cp /etc/gitea/app.ini /var/lib/gitea/custom/conf/app.ini
+  sudo chown git:git /var/lib/gitea/custom/conf/app.ini || true
+  sudo chmod 640 /var/lib/gitea/custom/conf/app.ini
 
   sudo systemctl daemon-reload
   sudo systemctl enable gitea
@@ -96,13 +102,20 @@ EOF
   pause
 }
 
+# --------- Runner presence check ----------
+runner_installed(){
+  if have_cmd act_runner; then return 0; fi
+  if systemctl list-unit-files 2>/dev/null | grep -q '^gitea-runner\.service'; then return 0; fi
+  if systemctl is-active gitea-runner >/dev/null 2>&1; then return 0; fi
+  return 1
+}
+
 # --------- 1) Install runner (install/re-register + restart) ----------
 install_runner(){
   print_hr
   echo "Install runner (act_runner) — install if missing OR re-register existing"
   print_hr
 
-  # Inputs
   local INSTANCE_URL REG_TOKEN RUNNER_NAME RUNNER_LABELS RUNNER_VERSION INSTALL_DIR SERVICE_USER
   INSTANCE_URL="$(ask "Gitea INSTANCE_URL" "http://192.168.0.140:3000/")"
   REG_TOKEN="$(ask "Registration token (from Gitea UI/CLI)" "")"
@@ -113,7 +126,6 @@ install_runner(){
   SERVICE_USER="$(ask "Systemd service user" "$USER")"
   [[ -n "$REG_TOKEN" ]] || { status_err "REG_TOKEN is required."; pause; return 1; }
 
-  # Install binary if missing
   if ! have_cmd act_runner; then
     status_info "Installing act_runner ${RUNNER_VERSION} ..."
     sudo apt-get update -y && sudo apt-get install -y curl unzip
@@ -123,7 +135,6 @@ install_runner(){
     status_info "act_runner already present."
   fi
 
-  # (Re)register
   status_info "Registering runner..."
   mkdir -p "$HOME/.config/act_runner"
   "${INSTALL_DIR}/act_runner" register \
@@ -132,7 +143,6 @@ install_runner(){
     --name "${RUNNER_NAME}" \
     --labels "${RUNNER_LABELS}"
 
-  # Service
   sudo tee /etc/systemd/system/gitea-runner.service >/dev/null <<EOF
 [Unit]
 Description=Gitea Actions Runner
@@ -348,6 +358,159 @@ uninstall_runner_only(){
   pause
 }
 
+# --------- 8) MySQL/MariaDB setup (Server / Client / Uninstall) ----------
+mysql_menu(){
+  print_hr
+  echo "MySQL/MariaDB Setup Manager"
+  print_hr
+  PS3="Choose mode: "
+  select MODE in "Server" "Client" "Uninstall" "Back"; do
+    case "${MODE:-}" in
+      Server)
+        read -rp "Enter MySQL root password (will be set): " DB_ROOT_PASS
+        read -rp "Enter database name for Gitea: " DB_NAME
+        read -rp "Enter Gitea DB username: " DB_USER
+        read -rsp "Enter Gitea DB user password: " DB_PASS; echo
+        read -rp "Enter Gitea domain/IP (default 192.168.0.130): " GITEA_DOMAIN
+        GITEA_DOMAIN="${GITEA_DOMAIN:-192.168.0.130}"
+
+        status_info "Installing MariaDB server + client..."
+        sudo apt-get update -y
+        sudo apt-get install -y mariadb-server mariadb-client
+
+        status_info "Starting/Enabling MariaDB..."
+        sudo systemctl enable mariadb
+        sudo systemctl start mariadb
+
+        status_info "Securing root account..."
+        sudo mysql -e "ALTER USER 'root'@'localhost' IDENTIFIED BY '${DB_ROOT_PASS}'; FLUSH PRIVILEGES;"
+
+        status_info "Creating database & user..."
+        sudo mysql -u root -p"${DB_ROOT_PASS}" <<EOF
+CREATE DATABASE IF NOT EXISTS \`${DB_NAME}\` CHARACTER SET utf8mb4 COLLATE utf8mb4_general_ci;
+CREATE USER IF NOT EXISTS '${DB_USER}'@'%' IDENTIFIED BY '${DB_PASS}';
+GRANT ALL PRIVILEGES ON \`${DB_NAME}\`.* TO '${DB_USER}'@'%';
+FLUSH PRIVILEGES;
+EOF
+
+        status_info "Allowing remote connections (unbinding 127.0.0.1)..."
+        MARIADB_CONF="/etc/mysql/mariadb.conf.d/50-server.cnf"
+        if [[ -f "$MARIADB_CONF" ]]; then
+          sudo sed -i 's/^[[:space:]]*bind-address[[:space:]]*=.*$/# bind-address = 127.0.0.1/' "$MARIADB_CONF" || true
+        fi
+        sudo systemctl restart mariadb
+
+        status_info "Writing Gitea app.ini for MySQL..."
+        sudo mkdir -p /etc/gitea /var/lib/gitea/custom/conf
+        sudo tee /etc/gitea/app.ini >/dev/null <<EOF
+[server]
+PROTOCOL = http
+HTTP_PORT = 3000
+DOMAIN = ${GITEA_DOMAIN}
+ROOT_URL = http://${GITEA_DOMAIN}:3000/
+STATIC_URL_PREFIX = /
+
+[actions]
+ENABLED = true
+
+[database]
+DB_TYPE  = mysql
+HOST     = 127.0.0.1:3306
+NAME     = ${DB_NAME}
+USER     = ${DB_USER}
+PASSWD   = ${DB_PASS}
+SCHEMA   =
+SSL_MODE = disable
+
+[repository]
+ROOT = /var/lib/gitea/data/gitea-repositories
+
+[log]
+MODE = console
+LEVEL = info
+EOF
+        # Mirror to service-used path
+        sudo cp /etc/gitea/app.ini /var/lib/gitea/custom/conf/app.ini
+        sudo chown git:git /var/lib/gitea/custom/conf/app.ini || true
+        sudo chmod 640 /var/lib/gitea/custom/conf/app.ini
+
+        status_info "Restarting Gitea..."
+        sudo systemctl restart gitea || true
+
+        cat <<INFO
+
+✅ MariaDB SERVER + Gitea config installed!
+
+Root password: ${DB_ROOT_PASS}
+
+Database: ${DB_NAME}
+User:     ${DB_USER}
+Password: ${DB_PASS}
+Gitea URL: http://${GITEA_DOMAIN}:3000/
+
+INFO
+        pause
+        break
+        ;;
+      Client)
+        status_info "Installing MariaDB client..."
+        sudo apt-get update -y
+        sudo apt-get install -y mariadb-client
+
+        status_info "Writing client template: \$HOME/.config/client-app.ini"
+        mkdir -p "$HOME/.config"
+        tee "$HOME/.config/client-app.ini" >/dev/null <<'EOF'
+[database]
+DB_TYPE  = mysql
+HOST     = <server-ip>:3306
+NAME     = <database-name>
+USER     = <username>
+PASSWD   = <password>
+SCHEMA   =
+SSL_MODE = disable
+EOF
+        cat <<'INFO'
+
+✅ MariaDB CLIENT installed!
+Template saved at: $HOME/.config/client-app.ini
+
+Edit it with your actual DB info.
+
+You can connect manually with:
+  mysql -u <username> -p -h <server-ip> <database>
+
+INFO
+        pause
+        break
+        ;;
+      Uninstall)
+        status_warn "This will remove MariaDB server/client and data."
+        read -rp "Proceed? (yes/no) [no]: " ans
+        if [[ "${ans:-no}" =~ ^y(es)?$ ]]; then
+          status_info "Stopping MariaDB..."
+          sudo systemctl stop mariadb || true
+
+          status_info "Removing packages..."
+          sudo apt-get purge -y mariadb-server mariadb-client mariadb-common || true
+          sudo apt-get autoremove -y || true
+          sudo apt-get autoclean -y || true
+
+          status_info "Removing configs/data..."
+          sudo rm -rf /etc/mysql /var/lib/mysql "$HOME/.config/client-app.ini"
+
+          status_ok "✅ MariaDB and client configs uninstalled!"
+        else
+          echo "Aborted."
+        fi
+        pause
+        break
+        ;;
+      Back) break ;;
+      *) echo "Invalid choice";;
+    esac
+  done
+}
+
 # --------- Main menu ----------
 main_menu(){
   while true; do
@@ -361,6 +524,7 @@ main_menu(){
     echo "5) SSHD Activate (enable password login; restart ssh)"
     echo "6) Uninstall Gitea server"
     echo "7) Uninstall runner"
+    echo "8) MySQL/MariaDB setup (Server / Client / Uninstall)"
     echo "q) Quit"
     echo "------------------------------------------"
     choice="$(ask "Choose an option" "")"
@@ -373,6 +537,7 @@ main_menu(){
       5) sshd_activate_flow ;;
       6) uninstall_gitea_only ;;
       7) uninstall_runner_only ;;
+      8) mysql_menu ;;
       q|Q) exit 0 ;;
       *) echo "Unknown option"; sleep 1 ;;
     esac
