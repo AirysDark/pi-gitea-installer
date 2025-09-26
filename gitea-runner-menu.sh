@@ -1,12 +1,11 @@
 #!/usr/bin/env bash
 # gitea-runner-menu.sh
-# Menu-driven helper for installing/uninstalling Gitea server & runners on Pi/Debian,
-# with Ops tools, SSHD activation, and MySQL/MariaDB setup (server/client/uninstall).
+# All-in-one helper for Gitea server/runner + MySQL/MariaDB on Pi/Debian.
 set -euo pipefail
 
 # --- Ensure netcat is available for network checks (requested) ---
 sudo apt-get update -y >/dev/null 2>&1 || true
-sudo apt-get install -y netcat-openbsd
+sudo apt-get install -y netcat-openbsd >/dev/null 2>&1 || true
 
 # --------- Helpers ----------
 ask() { # ask "Prompt" "default"
@@ -19,7 +18,6 @@ ask() { # ask "Prompt" "default"
     echo "${reply}"
   fi
 }
-
 pause() { read -rp "Press Enter to continue..." || true; }
 have_cmd() { command -v "$1" >/dev/null 2>&1; }
 print_hr() { printf '%*s\n' "$(tput cols 2>/dev/null || echo 80)" '' | tr ' ' '-'; }
@@ -358,13 +356,13 @@ uninstall_runner_only(){
   pause
 }
 
-# --------- 8) MySQL/MariaDB setup (Server / Client / Uninstall) ----------
+# --------- 8) MySQL/MariaDB setup (Server / Client / Uninstall / Test) ----------
 mysql_menu(){
   print_hr
   echo "MySQL/MariaDB Setup Manager"
   print_hr
   PS3="Choose mode: "
-  select MODE in "Server" "Client" "Uninstall" "Back"; do
+  select MODE in "Server" "Client" "Uninstall" "Test" "Back"; do
     case "${MODE:-}" in
       Server)
         read -rp "Enter MySQL root password (will be set): " DB_ROOT_PASS
@@ -449,38 +447,31 @@ Gitea URL: http://${GITEA_DOMAIN}:3000/
 
 INFO
         pause
-        break
         ;;
       Client)
+        read -rp "Enter MySQL server host/IP: " DB_HOST
+        read -rp "Enter database name: " DB_NAME
+        read -rp "Enter DB username: " DB_USER
+        read -rsp "Enter DB password: " DB_PASS; echo
+
         status_info "Installing MariaDB client..."
         sudo apt-get update -y
         sudo apt-get install -y mariadb-client
 
         status_info "Writing client template: \$HOME/.config/client-app.ini"
         mkdir -p "$HOME/.config"
-        tee "$HOME/.config/client-app.ini" >/dev/null <<'EOF'
+        tee "$HOME/.config/client-app.ini" >/dev/null <<EOF
 [database]
 DB_TYPE  = mysql
-HOST     = <server-ip>:3306
-NAME     = <database-name>
-USER     = <username>
-PASSWD   = <password>
+HOST     = ${DB_HOST}:3306
+NAME     = ${DB_NAME}
+USER     = ${DB_USER}
+PASSWD   = ${DB_PASS}
 SCHEMA   =
 SSL_MODE = disable
 EOF
-        cat <<'INFO'
-
-✅ MariaDB CLIENT installed!
-Template saved at: $HOME/.config/client-app.ini
-
-Edit it with your actual DB info.
-
-You can connect manually with:
-  mysql -u <username> -p -h <server-ip> <database>
-
-INFO
+        status_ok "✅ MariaDB CLIENT installed! Template: $HOME/.config/client-app.ini"
         pause
-        break
         ;;
       Uninstall)
         status_warn "This will remove MariaDB server/client and data."
@@ -502,10 +493,42 @@ INFO
           echo "Aborted."
         fi
         pause
-        break
+        ;;
+      Test)
+        echo "==> Choose test mode:"
+        select T in "Server-local" "Client-remote" "Back"; do
+          case "${T:-}" in
+            Server-local )
+              read -rsp "Enter local MySQL root password: " ROOTPW; echo
+              if mysql -u root -p"${ROOTPW}" -e "SHOW DATABASES;" >/dev/null 2>&1; then
+                status_ok "✅ Local server connection OK"
+              else
+                status_err "❌ Local server connection failed"
+              fi
+              ;;
+            Client-remote )
+              if [[ -f "$HOME/.config/client-app.ini" ]]; then
+                local HOST USER PASS NAME
+                HOST=$(grep -E '^HOST' "$HOME/.config/client-app.ini" | cut -d= -f2 | xargs)
+                USER=$(grep -E '^USER' "$HOME/.config/client-app.ini" | cut -d= -f2 | xargs)
+                PASS=$(grep -E '^PASSWD' "$HOME/.config/client-app.ini" | cut -d= -f2 | xargs)
+                NAME=$(grep -E '^NAME' "$HOME/.config/client-app.ini" | cut -d= -f2 | xargs)
+                if mysql -u "$USER" -p"$PASS" -h "${HOST%:*}" "$NAME" -e "SELECT 1;" >/dev/null 2>&1; then
+                  status_ok "✅ Remote client connection OK"
+                else
+                  status_err "❌ Remote client connection failed"
+                fi
+              else
+                status_err "❌ No $HOME/.config/client-app.ini found. Run Client setup first."
+              fi
+              ;;
+            Back ) break ;;
+            * ) echo "Invalid choice";;
+          esac
+        done
         ;;
       Back) break ;;
-      *) echo "Invalid choice";;
+      * ) echo "Invalid choice";;
     esac
   done
 }
@@ -523,7 +546,7 @@ main_menu(){
     echo "5) SSHD Activate (enable password login; restart ssh)"
     echo "6) Uninstall Gitea server"
     echo "7) Uninstall runner"
-    echo "8) MySQL/MariaDB setup (Server / Client / Uninstall)"
+    echo "8) MySQL/MariaDB setup (Server / Client / Uninstall / Test)"
     echo "q) Quit"
     echo "------------------------------------------"
     choice="$(ask "Choose an option" "")"
