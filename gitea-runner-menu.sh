@@ -4,6 +4,10 @@
 # with Ops tools, SSHD activation, and MySQL/MariaDB setup (server/client/uninstall).
 set -euo pipefail
 
+# --- Ensure netcat is available for network checks (requested) ---
+sudo apt-get update -y >/dev/null 2>&1 || true
+sudo apt-get install -y netcat-openbsd
+
 # --------- Helpers ----------
 ask() { # ask "Prompt" "default"
   local prompt="${1:-}" default="${2-}" reply
@@ -73,7 +77,6 @@ EOF
   local root_url="${proto}://${ip}:${port}/"
 
   sudo mkdir -p /etc/gitea /var/lib/gitea/custom/conf
-  # Write /etc/gitea/app.ini (also keep Actions enabled here)
   sudo tee /etc/gitea/app.ini >/dev/null <<EOF
 [server]
 PROTOCOL  = http
@@ -84,7 +87,6 @@ ROOT_URL  = ${root_url}
 [actions]
 ENABLED = true
 EOF
-  # Mirror to the path the service uses
   sudo cp /etc/gitea/app.ini /var/lib/gitea/custom/conf/app.ini
   sudo chown git:git /var/lib/gitea/custom/conf/app.ini || true
   sudo chmod 640 /var/lib/gitea/custom/conf/app.ini
@@ -280,9 +282,7 @@ ops_tools_menu(){
         ip="$(ask "Gitea IP/host" "192.168.0.140")"
         port="$(ask "Gitea HTTP port" "3000")"
         echo "curl check:"; curl -I "http://${ip}:${port}/" || echo "cannot reach :${port}"
-        echo "nc check:"
-        if have_cmd nc; then nc -vz "$ip" "$port" || true
-        else status_warn "nc not installed; try: sudo apt install -y netcat-openbsd"; fi
+        echo "nc check:"; nc -vz "$ip" "$port" || true
         pause
         ;;
       b|B) break ;;
@@ -429,7 +429,6 @@ ROOT = /var/lib/gitea/data/gitea-repositories
 MODE = console
 LEVEL = info
 EOF
-        # Mirror to service-used path
         sudo cp /etc/gitea/app.ini /var/lib/gitea/custom/conf/app.ini
         sudo chown git:git /var/lib/gitea/custom/conf/app.ini || true
         sudo chmod 640 /var/lib/gitea/custom/conf/app.ini
