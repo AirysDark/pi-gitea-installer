@@ -67,7 +67,7 @@ install_gitea_server(){
     msg_info "Gitea not found, installing..."
     sudo apt update && sudo apt upgrade -y
     sudo apt install -y git build-essential sqlite3 nginx fcgiwrap curl wget
-    # Pin arm64 build for Pi; change if x86_64
+    # Pin arm build for Pi; change if x86_64
     ARCH="$(uname -m)"; BIN_URL=""
     case "$ARCH" in
       aarch64|arm64) BIN_URL="https://dl.gitea.io/gitea/1.21.11/gitea-1.21.11-linux-arm64" ;;
@@ -274,12 +274,12 @@ ops_tools_menu(){
   while true; do
     clear; banner "Ops Tools" "status • logs • network • reconfigure"
     echo "${C_BOX}┌──────────────────────────────────────────────────────────────────────────┐${C_RESET}"
-    echo "${C_BOX}│${CRESET} ${C_BOLD}1)${C_RESET} Reconfigure runner (purge & re-register)                                    "
+    echo "${C_BOX}│${C_RESET} ${C_BOLD}1)${C_RESET} Reconfigure runner (purge & re-register)                                    "
     echo "${C_BOX}│${C_RESET} ${C_BOLD}2)${C_RESET} Update runner binary (external installer)                                    "
     echo "${C_BOX}│${C_RESET} ${C_BOLD}3)${C_RESET} Show runner service status                                                  "
     echo "${C_BOX}│${C_RESET} ${C_BOLD}4)${C_RESET} Tail runner logs (last 200)                                                    "
     echo "${C_BOX}│${C_RESET} ${C_BOLD}5)${C_RESET} Network checks to Gitea (curl + nc)                                           "
-    echo "${C_BOX}│${C_RESET} ${C_BOLD}6)${CRESET} Runner → MySQL connectivity test (run as service user)                      "
+    echo "${C_BOX}│${C_RESET} ${C_BOLD}6)${C_RESET} Runner → MySQL connectivity test (run as service user)                      "
     echo "${C_BOX}│${C_RESET} ${C_BOLD}b)${C_RESET} Back                                                                  "
     echo "${C_BOX}└──────────────────────────────────────────────────────────────────────────┘${C_RESET}"
     read -rp "$(printf "${C_ACC}> ${C_RESET}")" op
@@ -357,7 +357,7 @@ dns_noip_menu(){
     echo "${C_BOX}│${C_RESET} ${C_BOLD}1)${C_RESET} Install/Configure No-IP (ddclient)                                       "
     echo "${C_BOX}│${C_RESET} ${C_BOLD}2)${C_RESET} Force update now                                                          "
     echo "${C_BOX}│${C_RESET} ${C_BOLD}3)${C_RESET} Show ddclient service status                                              "
-    echo "${C_BOX}│${C_RESET} ${C_BOLD}4)${CRESET} Uninstall No-IP (ddclient)                                                "
+    echo "${C_BOX}│${C_RESET} ${C_BOLD}4)${C_RESET} Uninstall No-IP (ddclient)                                                "
     echo "${C_BOX}│${C_RESET} ${C_BOLD}b)${C_RESET} Back                                                                  "
     echo "${C_BOX}└──────────────────────────────────────────────────────────────────────────┘${C_RESET}"
     read -rp "$(printf "${C_ACC}> ${C_RESET}")" dch
@@ -468,8 +468,8 @@ mysql_menu(){
     echo "${C_BOX}│${C_RESET} ${C_BOLD}3)${C_RESET} Uninstall (server/client and data)                                             "
     echo "${C_BOX}│${C_RESET} ${C_BOLD}4)${C_RESET} Test Server connection                                                         "
     echo "${C_BOX}│${C_RESET} ${C_BOLD}5)${C_RESET} Test Client connection                                                         "
-    echo "${C_BOX}│${C_RESET} ${C_BOLD}b)${CRESET} Back                                                                  "
-    echo "${C_BOX}└──────────────────────────────────────────────────────────────────────────┘${CRESET}"
+    echo "${C_BOX}│${C_RESET} ${C_BOLD}b)${C_RESET} Back                                                                  "
+    echo "${C_BOX}└──────────────────────────────────────────────────────────────────────────┘${C_RESET}"
     read -rp "$(printf "${C_ACC}> ${C_RESET}")" MODE
     case "${MODE:-}" in
       1)
@@ -537,7 +537,7 @@ EOF
         print_hr
         echo "  ${C_BOLD}Root password:${C_RESET} ${DB_ROOT_PASS}"
         echo "  ${C_BOLD}Database:${C_RESET} ${DB_NAME}"
-        echo "  ${C_BOLD}User:${CRESET}     ${DB_USER}"
+        echo "  ${C_BOLD}User:${C_RESET}     ${DB_USER}"
         echo "  ${C_BOLD}Password:${C_RESET} ${DB_PASS}"
         echo "  ${C_BOLD}Gitea URL:${C_RESET} ${C_LINK}http://${GITEA_DOMAIN}:3000/${C_RESET}"
         print_hr
@@ -614,10 +614,10 @@ https_proxy_menu(){
     clear; banner "HTTPS Reverse Proxy" "Nginx + Certbot (Let's Encrypt)"
     echo "${C_BOX}┌──────────────────────────────────────────────────────────────────────────┐${C_RESET}"
     echo "${C_BOX}│${C_RESET} ${C_BOLD}1)${C_RESET} Install & configure Nginx proxy for Gitea + obtain TLS cert                "
-    echo "${C_BOX}│${CRESET} ${C_BOLD}2)${CRESET} Force cert renewal (dry-run)                                                "
-    echo "${C_BOX}│${C_RESET} ${C_BOLD}3)${CRESET} Show Nginx status / test config                                            "
-    echo "${C_BOX}│${C_RESET} ${C_BOLD}4)${CRESET} Uninstall proxy config (keeps Gitea)                                         "
-    echo "${C_BOX}│${C_RESET} ${C_BOLD}b)${CRESET} Back                                                                  "
+    echo "${C_BOX}│${C_RESET} ${C_BOLD}2)${C_RESET} Force cert renewal (dry-run)                                                "
+    echo "${C_BOX}│${C_RESET} ${C_BOLD}3)${C_RESET} Show Nginx status / test config                                            "
+    echo "${C_BOX}│${C_RESET} ${C_BOLD}4)${C_RESET} Uninstall proxy config (keeps Gitea)                                         "
+    echo "${C_BOX}│${C_RESET} ${C_BOLD}b)${C_RESET} Back                                                                  "
     echo "${C_BOX}└──────────────────────────────────────────────────────────────────────────┘${C_RESET}"
     read -rp "$(printf "${C_ACC}> ${C_RESET}")" pick
     case "$pick" in
@@ -632,8 +632,7 @@ https_proxy_menu(){
         sudo apt-get update -y
         sudo apt-get install -y nginx certbot python3-certbot-nginx
 
-        msg_info "Configuring Gitea to listen only on localhost:${GITEA_INTERNAL_PORT} and set https ROOT_URL..."
-        # Update /etc/gitea/app.ini safely
+        msg_info "Configuring Gitea to 127.0.0.1:${GITEA_INTERNAL_PORT} and https ROOT_URL..."
         sudo mkdir -p /etc/gitea /var/lib/gitea/custom/conf
         if [[ -f /etc/gitea/app.ini ]]; then
           sudo awk -v port="$GITEA_INTERNAL_PORT" -v domain="$DOMAIN" '
@@ -679,7 +678,6 @@ server {
     access_log /var/log/nginx/gitea_access.log;
     error_log  /var/log/nginx/gitea_error.log;
 
-    # ACME challenge location (Certbot)
     location ~ /.well-known/acme-challenge/ { allow all; }
 
     location / {
@@ -689,8 +687,6 @@ server {
         proxy_set_header   X-Real-IP         \$remote_addr;
         proxy_set_header   X-Forwarded-For   \$proxy_add_x_forwarded_for;
         proxy_set_header   X-Forwarded-Proto \$scheme;
-
-        # websockets / SSE
         proxy_set_header   Upgrade           \$http_upgrade;
         proxy_set_header   Connection        "upgrade";
     }
@@ -747,14 +743,14 @@ main_menu(){
     echo "${C_BOX}│${C_RESET} ${C_BOLD}0)${C_RESET} Install Gitea server & configs                                              "
     echo "${C_BOX}│${C_RESET} ${C_BOLD}1)${C_RESET} Install runner                                                                "
     echo "${C_BOX}│${C_RESET} ${C_BOLD}2)${C_RESET} Runner hook to Gitea (re-register)                                            "
-    echo "${C_BOX}│${C_RESET} ${C_BOLD}3)${CRESET} Show smoke-test workflow snippet                                                "
+    echo "${C_BOX}│${C_RESET} ${C_BOLD}3)${C_RESET} Show smoke-test workflow snippet                                                "
     echo "${C_BOX}│${C_RESET} ${C_BOLD}4)${C_RESET} Ops tools (reconfigure/update/logs/net + runner→MySQL test)                "
-    echo "${C_BOX}│${C_RESET} ${C_BOLD}5)${CRESET} DNS (No-IP via ddclient)                                                       "
+    echo "${C_BOX}│${C_RESET} ${C_BOLD}5)${C_RESET} DNS (No-IP via ddclient)                                                       "
     echo "${C_BOX}│${C_RESET} ${C_BOLD}6)${C_RESET} Uninstall Gitea server                                                        "
     echo "${C_BOX}│${C_RESET} ${C_BOLD}7)${C_RESET} Uninstall runner                                                              "
-    echo "${C_BOX}│${C_RESET} ${C_BOLD}8)${CRESET} MySQL/MariaDB setup (Server/Client/Uninstall/Tests)                         "
+    echo "${C_BOX}│${C_RESET} ${C_BOLD}8)${C_RESET} MySQL/MariaDB setup (Server/Client/Uninstall/Tests)                         "
     echo "${C_BOX}│${C_RESET} ${C_BOLD}9)${C_RESET} HTTPS reverse proxy (Nginx + Let's Encrypt)                                   "
-    echo "${C_BOX}│${C_RESET} ${C_BOLD}q)${CRESET} Quit                                                                          "
+    echo "${C_BOX}│${C_RESET} ${C_BOLD}q)${C_RESET} Quit                                                                          "
     echo "${C_BOX}└──────────────────────────────────────────────────────────────────────────┘${C_RESET}"
     read -rp "$(printf "${C_ACC}> ${C_RESET}")" choice
     case "$choice" in
