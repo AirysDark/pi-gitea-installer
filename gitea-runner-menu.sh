@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # gitea-runner-menu.sh
-# All-in-one helper for Gitea server/runner + MySQL/MariaDB + No-IP (DDNS) on Pi/Debian.
+# All-in-one helper for Gitea server/runner + MySQL/MariaDB + No-IP (DDNS) + HTTPS (Nginx+Let's Encrypt) on Pi/Debian.
 set -euo pipefail
 
 # --- Ensure netcat is available for network checks ---
@@ -8,100 +8,55 @@ sudo apt-get update -y >/dev/null 2>&1 || true
 sudo apt-get install -y netcat-openbsd >/dev/null 2>&1 || true
 
 # ==================== THEME ====================
-# 256-color dark-blue theme with graceful fallback
 supports_256() { tput colors 2>/dev/null | awk '{exit !($1>=256)}'; }
 if supports_256; then
-  C_RESET=$'\e[0m'
-  C_BOLD=$'\e[1m'
-  C_FAINT=$'\e[2m'
-  C_DIM=$'\e[2m'
-  C_INV=$'\e[7m'
-  C_PRIM_BG=$'\e[48;5;17m'     # deep navy bg
-  C_PRIM_TX=$'\e[38;5;153m'    # light cyan text
-  C_HEAD_TX=$'\e[38;5;195m'    # very light for titles
-  C_ACC=$'\e[38;5;81m'         # cyan accent
-  C_MUTED=$'\e[38;5;244m'      # grey
-  C_OK=$'\e[38;5;120m'         # green
-  C_WARN=$'\e[38;5;214m'       # orange
-  C_ERR=$'\e[38;5;203m'        # red
-  C_LINK=$'\e[38;5;110m'       # linky blue
-  C_BOX=$'\e[38;5;24m'         # border blue
+  C_RESET=$'\e[0m'; C_BOLD=$'\e[1m'; C_DIM=$'\e[2m'
+  C_PRIM_BG=$'\e[48;5;17m'; C_PRIM_TX=$'\e[38;5;153m'; C_HEAD_TX=$'\e[38;5;195m'
+  C_ACC=$'\e[38;5;81m'; C_MUTED=$'\e[38;5;244m'; C_OK=$'\e[38;5;120m'
+  C_WARN=$'\e[38;5;214m'; C_ERR=$'\e[38;5;203m'; C_LINK=$'\e[38;5;110m'; C_BOX=$'\e[38;5;24m'
 else
-  C_RESET=$'\e[0m'
-  C_BOLD=$'\e[1m'
-  C_FAINT=$'\e[2m'
-  C_DIM=$'\e[2m'
-  C_INV=$'\e[7m'
-  C_PRIM_BG=$'\e[44m'
-  C_PRIM_TX=$'\e[97m'
-  C_HEAD_TX=$'\e[97m'
-  C_ACC=$'\e[36m'
-  C_MUTED=$'\e[90m'
-  C_OK=$'\e[32m'
-  C_WARN=$'\e[33m'
-  C_ERR=$'\e[31m'
-  C_LINK=$'\e[36m'
-  C_BOX=$'\e[34m'
+  C_RESET=$'\e[0m'; C_BOLD=$'\e[1m'; C_DIM=$'\e[2m'
+  C_PRIM_BG=$'\e[44m'; C_PRIM_TX=$'\e[97m'; C_HEAD_TX=$'\e[97m'
+  C_ACC=$'\e[36m'; C_MUTED=$'\e[90m'; C_OK=$'\e[32m'
+  C_WARN=$'\e[33m'; C_ERR=$'\e[31m'; C_LINK=$'\e[36m'; C_BOX=$'\e[34m'
 fi
-
-term_width() { tput cols 2>/dev/null || echo 80; }
-hr() { local w; w=$(term_width); printf '%s\n' "$(printf '%*s' "$w" '' | tr ' ' '─')"; }
-pad_center() {
-  local text="$1" w; w=$(term_width)
-  local len=${#text}
-  local pad=$(( (w - len) / 2 ))
-  (( pad < 0 )) && pad=0
-  printf '%*s%s%*s\n' "$pad" '' "$text" "$pad" ''
+term_width(){ tput cols 2>/dev/null || echo 80; }
+hr(){ local w; w=$(term_width); printf '%s\n' "$(printf '%*s' "$w" '' | tr ' ' '─')"; }
+pad_center(){ local t="$1" w; w=$(term_width); local l=${#t}; local p=$(( (w-l)/2 )); ((p<0))&&p=0; printf '%*s%s%*s\n' "$p" '' "$t" "$p" ''; }
+banner(){ local t="$1" s="${2-}"; local w; w=$(term_width)
+  printf "${C_PRIM_BG}${C_HEAD_TX}${C_BOLD}%s\n" "$(printf '%*s' "$w" ' ' )"
+  pad_center "⚙  Gitea • Runner • MySQL • No-IP • HTTPS"
+  pad_center "$t"
+  [[ -n "$s" ]] && pad_center "${C_PRIM_TX}${s}${C_HEAD_TX}"
+  printf "%s${C_RESET}\n" "$(printf '%*s' "$w" ' ' )"
 }
-banner(){
-  local title="$1"
-  local subtitle="${2-}"
-  local w; w=$(term_width)
-  printf "${C_PRIM_BG}${C_HEAD_TX}${C_BOLD}"
-  printf '%s\n' "$(printf '%*s' "$w" ' ' )"
-  pad_center "⚙  Gitea • Runner • MySQL • No-IP"
-  pad_center "$title"
-  if [[ -n "$subtitle" ]]; then pad_center "${C_PRIM_TX}${subtitle}${C_HEAD_TX}"; fi
-  printf '%s\n' "$(printf '%*s' "$w" ' ' )"
-  printf "${C_RESET}"
-}
-section(){
-  local text="$1"
+section(){ local t="$1"
   printf "${C_BOX}┌──────────────────────────────────────────────────────────────────────────┐${C_RESET}\n"
-  printf "${C_BOX}│${C_RESET} ${C_BOLD}${C_ACC}%s${C_RESET}\n" "$text"
+  printf "${C_BOX}│${C_RESET} ${C_BOLD}${C_ACC}%s${C_RESET}\n" "$t"
   printf "${C_BOX}└──────────────────────────────────────────────────────────────────────────┘${C_RESET}\n"
 }
-msg_ok()   { printf "${C_OK}✔ %s${C_RESET}\n" "$*"; }
-msg_info() { printf "${C_ACC}ℹ %s${C_RESET}\n" "$*"; }
-msg_warn() { printf "${C_WARN}⚠ %s${C_RESET}\n" "$*"; }
-msg_err()  { printf "${C_ERR}✖ %s${C_RESET}\n" "$*"; }
+msg_ok(){ printf "${C_OK}✔ %s${C_RESET}\n" "$*"; }
+msg_info(){ printf "${C_ACC}ℹ %s${C_RESET}\n" "$*"; }
+msg_warn(){ printf "${C_WARN}⚠ %s${C_RESET}\n" "$*"; }
+msg_err(){ printf "${C_ERR}✖ %s${C_RESET}\n" "$*"; }
+print_hr(){ printf "${C_BOX}"; hr; printf "${C_RESET}"; }
 
 # ==================== HELPERS ====================
-ask() { # ask "Prompt" "default"
-  local prompt="${1:-}" default="${2-}" reply
-  if [[ -n "${default}" ]]; then
-    read -rp "$(printf "${C_ACC}?${C_RESET} ${prompt} ${C_MUTED}[%s]${C_RESET}: " "$default")" reply || true
-    echo "${reply:-$default}"
-  else
-    read -rp "$(printf "${C_ACC}?${C_RESET} ${prompt}: ")" reply || true
-    echo "${reply}"
-  fi
+ask(){ local p="${1:-}" d="${2-}" r
+  if [[ -n "$d" ]]; then read -rp "$(printf "${C_ACC}?${C_RESET} %s ${C_MUTED}[%s]${C_RESET}: " "$p" "$d")" r || true; echo "${r:-$d}"
+  else read -rp "$(printf "${C_ACC}?${C_RESET} %s: " "$p")" r || true; echo "$r"; fi
 }
-pause() { read -rp "$(printf "${C_MUTED}Press Enter to continue...${C_RESET} ")" || true; }
-have_cmd() { command -v "$1" >/dev/null 2>&1; }
-print_hr() { printf "${C_BOX}"; hr; printf "${C_RESET}"; }
-_systemctl() { (sudo systemctl "$@" 2>/dev/null) || (systemctl --user "$@" 2>/dev/null || true); }
-_systemctl_status() { _systemctl status "$@" --no-pager || true; }
-_journal_tail() { (sudo journalctl -u "$1" -n "${2:-200}" --no-pager 2>/dev/null) || true; }
+pause(){ read -rp "$(printf "${C_MUTED}Press Enter to continue...${C_RESET} ")" || true; }
+have_cmd(){ command -v "$1" >/dev/null 2>&1; }
+_systemctl(){ (sudo systemctl "$@" 2>/dev/null) || (systemctl --user "$@" 2>/dev/null || true); }
+_systemctl_status(){ _systemctl status "$@" --no-pager || true; }
+_journal_tail(){ (sudo journalctl -u "$1" -n "${2:-200}" --no-pager 2>/dev/null) || true; }
 
 # Resolve runner service user from systemd unit (fallback to $USER)
-get_runner_user() {
-  local unit="/etc/systemd/system/gitea-runner.service"
-  if [[ -f "$unit" ]] && grep -qE '^[[:space:]]*User=' "$unit"; then
-    grep -E '^[[:space:]]*User=' "$unit" | tail -n1 | cut -d= -f2 | xargs
-  else
-    echo "${USER}"
-  fi
+get_runner_user(){
+  local u="/etc/systemd/system/gitea-runner.service"
+  if [[ -f "$u" ]] && grep -qE '^[[:space:]]*User=' "$u"; then grep -E '^[[:space:]]*User=' "$u" | tail -n1 | cut -d= -f2 | xargs
+  else echo "${USER}"; fi
 }
 
 # ==================== 0) GITEA INSTALL ====================
@@ -112,14 +67,18 @@ install_gitea_server(){
     msg_info "Gitea not found, installing..."
     sudo apt update && sudo apt upgrade -y
     sudo apt install -y git build-essential sqlite3 nginx fcgiwrap curl wget
-    # Pin version for Pi/arm64 stability (adjust if needed)
-    wget -O gitea https://dl.gitea.io/gitea/1.21.11/gitea-1.21.11-linux-arm64
-    chmod +x gitea
-    sudo mv gitea /usr/local/bin/
+    # Pin arm64 build for Pi; change if x86_64
+    ARCH="$(uname -m)"; BIN_URL=""
+    case "$ARCH" in
+      aarch64|arm64) BIN_URL="https://dl.gitea.io/gitea/1.21.11/gitea-1.21.11-linux-arm64" ;;
+      x86_64|amd64)  BIN_URL="https://dl.gitea.io/gitea/1.21.11/gitea-1.21.11-linux-amd64" ;;
+      *) BIN_URL="https://dl.gitea.io/gitea/1.21.11/gitea-1.21.11-linux-arm64" ;;
+    esac
+    wget -O gitea "$BIN_URL"
+    chmod +x gitea && sudo mv gitea /usr/local/bin/
     sudo adduser --system --group --disabled-password --home /home/git git || true
     sudo mkdir -p /var/lib/gitea/{custom,data,log}
-    sudo chown -R git:git /var/lib/gitea/
-    sudo chmod -R 750 /var/lib/gitea/
+    sudo chown -R git:git /var/lib/gitea/ && sudo chmod -R 750 /var/lib/gitea/
     sudo tee /etc/systemd/system/gitea.service >/dev/null <<'EOF'
 [Unit]
 Description=Gitea (GitHub clone)
@@ -147,7 +106,7 @@ EOF
   local ip port proto root_url
   ip="$(ask "Enter Gitea host/IP (for ROOT_URL)" "192.168.0.140")"
   port="$(ask "Enter Gitea port" "3000")"
-  proto="$(ask "Protocol" "http")"
+  proto="$(ask "Protocol (http/https)" "http")"
   root_url="${proto}://${ip}:${port}/"
 
   sudo mkdir -p /etc/gitea /var/lib/gitea/custom/conf
@@ -184,7 +143,7 @@ EOF
 install_runner(){
   clear; banner "Install runner (act_runner)" "install if missing • register • systemd service"
   section "Runner inputs"
-  local INSTANCE_URL REG_TOKEN RUNNER_NAME RUNNER_LABELS RUNNER_VERSION INSTALL_DIR SERVICE_USER
+  local INSTANCE_URL REG_TOKEN RUNNER_NAME RUNNER_LABELS RUNNER_VERSION INSTALL_DIR SERVICE_USER ARCH
   INSTANCE_URL="$(ask "Gitea INSTANCE_URL" "http://192.168.0.140:3000/")"
   REG_TOKEN="$(ask "Registration token (from Gitea UI/CLI)" "")"
   RUNNER_NAME="$(ask "Runner name" "runner-pi")"
@@ -197,7 +156,13 @@ install_runner(){
   section "Install/Update act_runner"
   if ! have_cmd act_runner; then
     sudo apt-get update -y && sudo apt-get install -y curl unzip
-    curl -L "https://gitea.com/gitea/act_runner/releases/download/v${RUNNER_VERSION}/act_runner-${RUNNER_VERSION}-linux-arm64" -o /tmp/act_runner
+    ARCH="$(uname -m)"; RUN_URL=""
+    case "$ARCH" in
+      aarch64|arm64) RUN_URL="https://gitea.com/gitea/act_runner/releases/download/v${RUNNER_VERSION}/act_runner-${RUNNER_VERSION}-linux-arm64" ;;
+      x86_64|amd64)  RUN_URL="https://gitea.com/gitea/act_runner/releases/download/v${RUNNER_VERSION}/act_runner-${RUNNER_VERSION}-linux-amd64" ;;
+      *) RUN_URL="https://gitea.com/gitea/act_runner/releases/download/v${RUNNER_VERSION}/act_runner-${RUNNER_VERSION}-linux-arm64" ;;
+    esac
+    curl -L "$RUN_URL" -o /tmp/act_runner
     chmod +x /tmp/act_runner && sudo mv /tmp/act_runner "${INSTALL_DIR}/act_runner"
     msg_ok "act_runner installed."
   else
@@ -309,12 +274,12 @@ ops_tools_menu(){
   while true; do
     clear; banner "Ops Tools" "status • logs • network • reconfigure"
     echo "${C_BOX}┌──────────────────────────────────────────────────────────────────────────┐${C_RESET}"
-    echo "${C_BOX}│${C_RESET} ${C_BOLD}1)${C_RESET} Reconfigure runner (purge & re-register)                                    "
+    echo "${C_BOX}│${CRESET} ${C_BOLD}1)${C_RESET} Reconfigure runner (purge & re-register)                                    "
     echo "${C_BOX}│${C_RESET} ${C_BOLD}2)${C_RESET} Update runner binary (external installer)                                    "
     echo "${C_BOX}│${C_RESET} ${C_BOLD}3)${C_RESET} Show runner service status                                                  "
     echo "${C_BOX}│${C_RESET} ${C_BOLD}4)${C_RESET} Tail runner logs (last 200)                                                    "
     echo "${C_BOX}│${C_RESET} ${C_BOLD}5)${C_RESET} Network checks to Gitea (curl + nc)                                           "
-    echo "${C_BOX}│${C_RESET} ${C_BOLD}6)${C_RESET} Runner → MySQL connectivity test (run as service user)                      "
+    echo "${C_BOX}│${C_RESET} ${C_BOLD}6)${CRESET} Runner → MySQL connectivity test (run as service user)                      "
     echo "${C_BOX}│${C_RESET} ${C_BOLD}b)${C_RESET} Back                                                                  "
     echo "${C_BOX}└──────────────────────────────────────────────────────────────────────────┘${C_RESET}"
     read -rp "$(printf "${C_ACC}> ${C_RESET}")" op
@@ -392,7 +357,7 @@ dns_noip_menu(){
     echo "${C_BOX}│${C_RESET} ${C_BOLD}1)${C_RESET} Install/Configure No-IP (ddclient)                                       "
     echo "${C_BOX}│${C_RESET} ${C_BOLD}2)${C_RESET} Force update now                                                          "
     echo "${C_BOX}│${C_RESET} ${C_BOLD}3)${C_RESET} Show ddclient service status                                              "
-    echo "${C_BOX}│${C_RESET} ${C_BOLD}4)${C_RESET} Uninstall No-IP (ddclient)                                                "
+    echo "${C_BOX}│${C_RESET} ${C_BOLD}4)${CRESET} Uninstall No-IP (ddclient)                                                "
     echo "${C_BOX}│${C_RESET} ${C_BOLD}b)${C_RESET} Back                                                                  "
     echo "${C_BOX}└──────────────────────────────────────────────────────────────────────────┘${C_RESET}"
     read -rp "$(printf "${C_ACC}> ${C_RESET}")" dch
@@ -403,7 +368,6 @@ dns_noip_menu(){
         read -rsp "$(printf "${C_ACC}?${C_RESET} No-IP password: ")" NOIP_PASS; echo
         NOIP_HOSTS="$(ask "Hostname(s) (comma-separated, e.g. myhost.ddns.net)" "")"
         INTERVAL="$(ask "Update interval seconds" "300")"
-
         [[ -n "$NOIP_USER" && -n "$NOIP_PASS" && -n "$NOIP_HOSTS" ]] || { msg_err "All fields are required."; pause; continue; }
 
         msg_info "Installing ddclient..."
@@ -421,8 +385,6 @@ login=${NOIP_USER}
 password='${NOIP_PASS}'
 ${NOIP_HOSTS}
 EOF
-
-        msg_info "Enabling daemon mode..."
         if [[ -f /etc/default/ddclient ]]; then
           sudo sed -i 's/^run_daemon=.*/run_daemon="true"/' /etc/default/ddclient || true
           sudo sed -i "s/^daemon=.*/daemon=${INTERVAL}/" /etc/default/ddclient || echo "daemon=${INTERVAL}" | sudo tee -a /etc/default/ddclient >/dev/null
@@ -433,33 +395,15 @@ daemon=${INTERVAL}
 syslog=yes
 EOF
         fi
-
-        msg_info "Restarting ddclient..."
         sudo systemctl enable ddclient
         sudo systemctl restart ddclient
-
-        msg_info "Forcing immediate update..."
         sudo ddclient -force -verbose || true
-
         msg_ok "No-IP (ddclient) installed & configured"
         echo "Config: /etc/ddclient.conf"
         pause
         ;;
-      2)
-        msg_info "Forcing ddclient update..."
-        if sudo ddclient -force -verbose; then
-          msg_ok "Update sent"
-        else
-          msg_err "Update failed (check credentials/hostname)"
-        fi
-        pause
-        ;;
-      3)
-        _systemctl_status ddclient
-        echo; msg_info "Recent logs (syslog):"
-        (sudo tail -n 100 /var/log/syslog 2>/dev/null | grep -i ddclient || true)
-        pause
-        ;;
+      2) msg_info "Forcing ddclient update..."; sudo ddclient -force -verbose && msg_ok "Update sent" || msg_err "Update failed"; pause;;
+      3) _systemctl_status ddclient; echo; msg_info "Recent logs (syslog):"; (sudo tail -n 100 /var/log/syslog 2>/dev/null | grep -i ddclient || true); pause;;
       4)
         msg_warn "This will remove ddclient and its config."
         local sure; sure="$(ask "Proceed? (yes/no)" "no")"
@@ -470,9 +414,7 @@ EOF
           sudo apt-get autoremove -y || true
           sudo rm -f /etc/ddclient.conf /etc/default/ddclient
           msg_ok "No-IP (ddclient) uninstalled"
-        else
-          echo "Aborted."
-        fi
+        else echo "Aborted."; fi
         pause
         ;;
       b|B) break ;;
@@ -526,8 +468,8 @@ mysql_menu(){
     echo "${C_BOX}│${C_RESET} ${C_BOLD}3)${C_RESET} Uninstall (server/client and data)                                             "
     echo "${C_BOX}│${C_RESET} ${C_BOLD}4)${C_RESET} Test Server connection                                                         "
     echo "${C_BOX}│${C_RESET} ${C_BOLD}5)${C_RESET} Test Client connection                                                         "
-    echo "${C_BOX}│${C_RESET} ${C_BOLD}b)${C_RESET} Back                                                                  "
-    echo "${C_BOX}└──────────────────────────────────────────────────────────────────────────┘${C_RESET}"
+    echo "${C_BOX}│${C_RESET} ${C_BOLD}b)${CRESET} Back                                                                  "
+    echo "${C_BOX}└──────────────────────────────────────────────────────────────────────────┘${CRESET}"
     read -rp "$(printf "${C_ACC}> ${C_RESET}")" MODE
     case "${MODE:-}" in
       1)
@@ -541,8 +483,7 @@ mysql_menu(){
         msg_info "Installing MariaDB server + client..."
         sudo apt-get update -y
         sudo apt-get install -y mariadb-server mariadb-client
-        sudo systemctl enable mariadb
-        sudo systemctl start mariadb
+        sudo systemctl enable mariadb && sudo systemctl start mariadb
         msg_info "Securing root user..."
         sudo mysql -e "ALTER USER 'root'@'localhost' IDENTIFIED BY '${DB_ROOT_PASS}'; FLUSH PRIVILEGES;"
         msg_info "Creating DB & user..."
@@ -596,7 +537,7 @@ EOF
         print_hr
         echo "  ${C_BOLD}Root password:${C_RESET} ${DB_ROOT_PASS}"
         echo "  ${C_BOLD}Database:${C_RESET} ${DB_NAME}"
-        echo "  ${C_BOLD}User:${C_RESET}     ${DB_USER}"
+        echo "  ${C_BOLD}User:${CRESET}     ${DB_USER}"
         echo "  ${C_BOLD}Password:${C_RESET} ${DB_PASS}"
         echo "  ${C_BOLD}Gitea URL:${C_RESET} ${C_LINK}http://${GITEA_DOMAIN}:3000/${C_RESET}"
         print_hr
@@ -610,8 +551,7 @@ EOF
         DB_NAME="$(ask "Database name" "gitea")"
         DB_USER="$(ask "DB username" "gitea")"
         read -rsp "$(printf "${C_ACC}?${C_RESET} DB password: ")" DB_PASS; echo
-        sudo apt-get update -y
-        sudo apt-get install -y mariadb-client
+        sudo apt-get update -y && sudo apt-get install -y mariadb-client
         mkdir -p "$HOME/.config"
         tee "$HOME/.config/client-app.ini" >/dev/null <<EOF
 [database]
@@ -630,18 +570,12 @@ EOF
         clear; banner "MariaDB Uninstall" "server/client and data"
         local ans; ans="$(ask "Proceed? (yes/no)" "no")"
         if [[ "${ans}" =~ ^y(es)?$ ]]; then
-          msg_info "Stopping MariaDB..."
-          sudo systemctl stop mariadb || true
-          msg_info "Removing packages..."
-          sudo apt-get purge -y mariadb-server mariadb-client mariadb-common || true
-          sudo apt-get autoremove -y || true
-          sudo apt-get autoclean -y || true
-          msg_info "Removing configs/data..."
-          sudo rm -rf /etc/mysql /var/lib/mysql "$HOME/.config/client-app.ini"
+          msg_info "Stopping MariaDB..."; sudo systemctl stop mariadb || true
+          msg_info "Removing packages..."; sudo apt-get purge -y mariadb-server mariadb-client mariadb-common || true
+          sudo apt-get autoremove -y || true; sudo apt-get autoclean -y || true
+          msg_info "Removing configs/data..."; sudo rm -rf /etc/mysql /var/lib/mysql "$HOME/.config/client-app.ini"
           msg_ok "MariaDB and client configs uninstalled."
-        else
-          echo "Aborted."
-        fi
+        else echo "Aborted."; fi
         pause
         ;;
       4)
@@ -653,9 +587,7 @@ EOF
         DB_NAME="$(ask "DB name" "gitea")"
         if mysql -h "$DB_HOST" -u "$DB_USER" -p"$DB_PASS" "$DB_NAME" -e "SELECT 1;" >/dev/null 2>&1; then
           msg_ok "Server test OK."
-        else
-          msg_err "Server test FAILED."
-        fi
+        else msg_err "Server test FAILED."; fi
         pause
         ;;
       5)
@@ -667,9 +599,138 @@ EOF
         DB_NAME="$(ask "DB name" "gitea")"
         if mysql -h "$DB_HOST" -u "$DB_USER" -p"$DB_PASS" "$DB_NAME" -e "SELECT 1;" >/dev/null 2>&1; then
           msg_ok "Client test OK."
+        else msg_err "Client test FAILED."; fi
+        pause
+        ;;
+      b|B) break ;;
+      *) echo "Invalid choice";;
+    esac
+  done
+}
+
+# ==================== 9) HTTPS REVERSE PROXY (NGINX + LET'S ENCRYPT) ====================
+https_proxy_menu(){
+  while true; do
+    clear; banner "HTTPS Reverse Proxy" "Nginx + Certbot (Let's Encrypt)"
+    echo "${C_BOX}┌──────────────────────────────────────────────────────────────────────────┐${C_RESET}"
+    echo "${C_BOX}│${C_RESET} ${C_BOLD}1)${C_RESET} Install & configure Nginx proxy for Gitea + obtain TLS cert                "
+    echo "${C_BOX}│${CRESET} ${C_BOLD}2)${CRESET} Force cert renewal (dry-run)                                                "
+    echo "${C_BOX}│${C_RESET} ${C_BOLD}3)${CRESET} Show Nginx status / test config                                            "
+    echo "${C_BOX}│${C_RESET} ${C_BOLD}4)${CRESET} Uninstall proxy config (keeps Gitea)                                         "
+    echo "${C_BOX}│${C_RESET} ${C_BOLD}b)${CRESET} Back                                                                  "
+    echo "${C_BOX}└──────────────────────────────────────────────────────────────────────────┘${C_RESET}"
+    read -rp "$(printf "${C_ACC}> ${C_RESET}")" pick
+    case "$pick" in
+      1)
+        clear; banner "HTTPS Setup" "Nginx reverse proxy + Let's Encrypt"
+        local DOMAIN EMAIL GITEA_INTERNAL_PORT
+        DOMAIN="$(ask "Your domain/No-IP hostname (e.g. myhost.ddns.net)" "myhost.ddns.net")"
+        EMAIL="$(ask "Email for Let's Encrypt notices" "you@example.com")"
+        GITEA_INTERNAL_PORT="$(ask "Gitea internal port" "3000")"
+
+        msg_info "Installing Nginx + Certbot plugin..."
+        sudo apt-get update -y
+        sudo apt-get install -y nginx certbot python3-certbot-nginx
+
+        msg_info "Configuring Gitea to listen only on localhost:${GITEA_INTERNAL_PORT} and set https ROOT_URL..."
+        # Update /etc/gitea/app.ini safely
+        sudo mkdir -p /etc/gitea /var/lib/gitea/custom/conf
+        if [[ -f /etc/gitea/app.ini ]]; then
+          sudo awk -v port="$GITEA_INTERNAL_PORT" -v domain="$DOMAIN" '
+            BEGIN{srv=0;act=0}
+            /^\[server\]/{srv=1;act=0;print;next}
+            /^\[actions\]/{srv=0;act=1;print;next}
+            /^\[/{srv=0;act=0;print;next}
+            {
+              if(srv==1){
+                if($0 ~ /^HTTP_ADDR[ \t]*=/){print "HTTP_ADDR = 127.0.0.1"; next}
+                if($0 ~ /^HTTP_PORT[ \t]*=/){print "HTTP_PORT = " port; next}
+                if($0 ~ /^PROTOCOL[ \t]*=/){print "PROTOCOL = http"; next}
+                if($0 ~ /^ROOT_URL[ \t]*=/){print "ROOT_URL = https://" domain "/"; next}
+              }
+              print
+            }
+          ' /etc/gitea/app.ini | sudo tee /etc/gitea/app.ini.tmp >/dev/null
+          sudo mv /etc/gitea/app.ini.tmp /etc/gitea/app.ini
         else
-          msg_err "Client test FAILED."
+          sudo tee /etc/gitea/app.ini >/dev/null <<EOF
+[server]
+PROTOCOL  = http
+HTTP_ADDR = 127.0.0.1
+HTTP_PORT = ${GITEA_INTERNAL_PORT}
+ROOT_URL  = https://${DOMAIN}/
+
+[actions]
+ENABLED = true
+EOF
         fi
+        sudo cp /etc/gitea/app.ini /var/lib/gitea/custom/conf/app.ini || true
+        sudo chown git:git /var/lib/gitea/custom/conf/app.ini 2>/dev/null || true
+        sudo chmod 640 /var/lib/gitea/custom/conf/app.ini 2>/dev/null || true
+        sudo systemctl restart gitea
+
+        msg_info "Creating Nginx site config for ${DOMAIN}..."
+        sudo tee /etc/nginx/sites-available/gitea >/dev/null <<EOF
+server {
+    listen 80;
+    listen [::]:80;
+    server_name ${DOMAIN};
+
+    access_log /var/log/nginx/gitea_access.log;
+    error_log  /var/log/nginx/gitea_error.log;
+
+    # ACME challenge location (Certbot)
+    location ~ /.well-known/acme-challenge/ { allow all; }
+
+    location / {
+        proxy_pass         http://127.0.0.1:${GITEA_INTERNAL_PORT};
+        proxy_http_version 1.1;
+        proxy_set_header   Host              \$host;
+        proxy_set_header   X-Real-IP         \$remote_addr;
+        proxy_set_header   X-Forwarded-For   \$proxy_add_x_forwarded_for;
+        proxy_set_header   X-Forwarded-Proto \$scheme;
+
+        # websockets / SSE
+        proxy_set_header   Upgrade           \$http_upgrade;
+        proxy_set_header   Connection        "upgrade";
+    }
+}
+EOF
+        sudo ln -sf /etc/nginx/sites-available/gitea /etc/nginx/sites-enabled/gitea
+        sudo nginx -t && sudo systemctl reload nginx
+
+        msg_info "Requesting Let's Encrypt certificate (HTTP-01)..."
+        if sudo certbot --nginx -d "${DOMAIN}" --non-interactive --agree-tos -m "${EMAIL}" --redirect; then
+          msg_ok "Certificate obtained and HTTPS redirect enabled."
+        else
+          msg_err "Certbot failed. Ensure port 80 is reachable from the internet to this host."
+        fi
+
+        print_hr
+        echo "Open: ${C_LINK}https://${DOMAIN}/${C_RESET}"
+        echo "Ports needed open/forwarded: ${C_BOLD}80/tcp${C_RESET} (for initial/renewal), ${C_BOLD}443/tcp${C_RESET} (HTTPS)."
+        print_hr
+        pause
+        ;;
+      2)
+        msg_info "Certbot dry-run renewal..."
+        if sudo certbot renew --dry-run; then msg_ok "Dry-run succeeded."; else msg_err "Dry-run failed."; fi
+        pause
+        ;;
+      3)
+        section "Nginx status & config test"
+        _systemctl_status nginx
+        echo; msg_info "nginx -t output:"; sudo nginx -t || true
+        pause
+        ;;
+      4)
+        msg_warn "This removes the Nginx gitea site and reloads Nginx (Gitea kept)."
+        local sure; sure="$(ask "Proceed? (yes/no)" "no")"
+        if [[ "$sure" =~ ^y(es)?$ ]]; then
+          sudo rm -f /etc/nginx/sites-enabled/gitea /etc/nginx/sites-available/gitea
+          sudo nginx -t && sudo systemctl reload nginx || true
+          msg_ok "Proxy config removed."
+        else echo "Aborted."; fi
         pause
         ;;
       b|B) break ;;
@@ -686,13 +747,14 @@ main_menu(){
     echo "${C_BOX}│${C_RESET} ${C_BOLD}0)${C_RESET} Install Gitea server & configs                                              "
     echo "${C_BOX}│${C_RESET} ${C_BOLD}1)${C_RESET} Install runner                                                                "
     echo "${C_BOX}│${C_RESET} ${C_BOLD}2)${C_RESET} Runner hook to Gitea (re-register)                                            "
-    echo "${C_BOX}│${C_RESET} ${C_BOLD}3)${C_RESET} Show smoke-test workflow snippet                                                "
+    echo "${C_BOX}│${C_RESET} ${C_BOLD}3)${CRESET} Show smoke-test workflow snippet                                                "
     echo "${C_BOX}│${C_RESET} ${C_BOLD}4)${C_RESET} Ops tools (reconfigure/update/logs/net + runner→MySQL test)                "
-    echo "${C_BOX}│${C_RESET} ${C_BOLD}5)${C_RESET} DNS (No-IP via ddclient)                                                       "
+    echo "${C_BOX}│${C_RESET} ${C_BOLD}5)${CRESET} DNS (No-IP via ddclient)                                                       "
     echo "${C_BOX}│${C_RESET} ${C_BOLD}6)${C_RESET} Uninstall Gitea server                                                        "
     echo "${C_BOX}│${C_RESET} ${C_BOLD}7)${C_RESET} Uninstall runner                                                              "
-    echo "${C_BOX}│${C_RESET} ${C_BOLD}8)${C_RESET} MySQL/MariaDB setup (Server/Client/Uninstall/Tests)                         "
-    echo "${C_BOX}│${C_RESET} ${C_BOLD}q)${C_RESET} Quit                                                                          "
+    echo "${C_BOX}│${C_RESET} ${C_BOLD}8)${CRESET} MySQL/MariaDB setup (Server/Client/Uninstall/Tests)                         "
+    echo "${C_BOX}│${C_RESET} ${C_BOLD}9)${C_RESET} HTTPS reverse proxy (Nginx + Let's Encrypt)                                   "
+    echo "${C_BOX}│${C_RESET} ${C_BOLD}q)${CRESET} Quit                                                                          "
     echo "${C_BOX}└──────────────────────────────────────────────────────────────────────────┘${C_RESET}"
     read -rp "$(printf "${C_ACC}> ${C_RESET}")" choice
     case "$choice" in
@@ -705,6 +767,7 @@ main_menu(){
       6) uninstall_gitea_only ;;
       7) uninstall_runner_only ;;
       8) mysql_menu ;;
+      9) https_proxy_menu ;;
       q|Q) exit 0 ;;
       *) echo "Unknown option"; sleep 1 ;;
     esac
